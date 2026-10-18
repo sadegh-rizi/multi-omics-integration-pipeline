@@ -1,0 +1,13 @@
+# generated outputs (re-create with the pipeline or the notebook)
+results/
+# data/ holds the SIMULATED toy data (safe to commit). Never commit real study data:
+# keep real files outside the repository or add their names below.
+data/*real*
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
+.Rhistory
+.RData

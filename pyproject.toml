@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mia-multiomics"
+version = "1.0.0"
+description = "Lipidomics, metabolomics and proteomics analysis and integration pipeline for a maternal-immune-activation mouse study"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "statsmodels>=0.14",
+    "matplotlib>=3.8",
+    "openpyxl>=3.1",
+    "patsy>=0.5",
+    "mofapy2>=0.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "nbformat", "nbclient", "ipykernel", "jupyter"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
+
+[tool.ruff]
+line-length = 130
+src = ["src", "tests"]
