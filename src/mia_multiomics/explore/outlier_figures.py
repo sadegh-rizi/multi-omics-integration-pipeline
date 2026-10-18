@@ -75,6 +75,7 @@ def _region_rows(view: View, region: str) -> pd.DataFrame:
 
 
 def t2_plot(view: View, region: str = "Cortex") -> plt.Figure:
+    """Hotelling T² of every sample of one region, with the 95 % and 99 % limits."""
     rows = _region_rows(view, region)
     fig = plotting.index_plot(rows["hotelling_t2"], rows["Sample number"],
                               {"95 %": rows["hotelling_t2_95_limit"].iloc[0], "99 %": rows["hotelling_t2_99_limit"].iloc[0]},
@@ -83,6 +84,7 @@ def t2_plot(view: View, region: str = "Cortex") -> plt.Figure:
 
 
 def dmodx_plot(view: View, region: str = "Cortex") -> plt.Figure:
+    """Normalised distance to the PCA model of every sample of one region, with the 95 % limit."""
     rows = _region_rows(view, region)
     fig = plotting.index_plot(rows["normalized_dmodx"], rows["Sample number"], {"95 %": rows["dmodx_95_limit"].iloc[0]},
                               title=f"{resolve_scope(region)}: distance to the PCA model (DModX)", ylabel="normalised DModX")

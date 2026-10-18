@@ -3,6 +3,18 @@
 All scores increase with unusualness.  The proximity and partition detectors
 are applied to PCA score matrices by the ensemble driver; Ledoit-Wolf retains
 the complete feature space because shrinkage makes that covariance invertible.
+
+The detector families (each looks for a different kind of "unusual"):
+
+* kNN distance       - far from its nearest neighbours (isotropic or "soft" weighting);
+* local outlier factor (LOF) - in a sparser neighbourhood than its neighbours are;
+* isolation forest   - separated from the rest by few random splits;
+* kernel PCA         - badly reconstructed by a non-linear PCA;
+* Ledoit-Wolf Mahalanobis - far from the centre given the (shrunk) covariance.
+
+Each has ``*_sweep`` versions that score several parameter values at once, and
+``*_array`` versions that score a whole batch of simulated data sets (used by
+:mod:`.calibration`).
 """
 
 from __future__ import annotations
@@ -19,6 +31,7 @@ from sklearn.ensemble import IsolationForest
 
 
 def _numeric(values: pd.DataFrame) -> np.ndarray:
+    """Samples x variables as a float array; raise if empty, missing or infinite."""
     numeric = values.apply(pd.to_numeric, errors="coerce")
     if numeric.empty or numeric.isna().to_numpy().any() or not np.isfinite(numeric.to_numpy()).all():
         raise ValueError("Outlier detectors require a non-empty, finite sample-by-variable matrix.")

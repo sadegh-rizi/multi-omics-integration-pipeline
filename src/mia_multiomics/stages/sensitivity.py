@@ -59,6 +59,7 @@ def specification_curve(settings: Settings, omics: str = "lipidomics") -> pd.Dat
     cv = qc.qc_injection_cv(data.techmix)
     low_cv = cv.index[cv["normalized_cv_percent"].le(config.QC_CV_THRESHOLD)]
     rows, recovery = [], []
+    # Every combination: prevalence filter on/off x Tech-Mix CV filter on/off x 4 imputation choices.
     for prevalence in (False, True):
         prepared = preprocess(data, max_missing_fraction=config.MAX_MISSING_FRACTION if prevalence else None)
         values, meta = prepared.values, prepared.metadata
@@ -70,6 +71,7 @@ def specification_curve(settings: Settings, omics: str = "lipidomics") -> pd.Dat
                 if settings.quick and method == "rf_all":
                     continue
                 spec = f"prevalence_{'on' if prevalence else 'off'}__cv_{'on' if cv_filter else 'off'}__{method}"
+                # Refit the model and the PLS-DA test on this specification and summarise the hits.
                 completed = _impute(values.loc[panel], mask.loc[panel], meta, imputer, settings.seed)
                 effects = fit_regionwise_differential(completed, meta, annotations=data.features,
                                                       min_per_cell=config.MIN_PER_CELL).effects
@@ -80,6 +82,7 @@ def specification_curve(settings: Settings, omics: str = "lipidomics") -> pd.Dat
                                  "n_features": len(block), "n_fdr_hits": int(block["p_value_fdr"].le(config.FDR_ALPHA).sum()),
                                  "min_q": block["p_value_fdr"].min(), "n_p_below_0.01": int(block["p_value"].lt(0.01).sum()),
                                  "expected_p_below_0.01": 0.01 * len(block), "plsda_p": plsda[region]})
+                # How well does the imputer recover values we hid on purpose?
                 if method != "none" and not (settings.quick and method.startswith("rf")):
                     recovery.append({"specification": spec, "imputation": method,
                                      "rmse": _recovery_rmse(values.loc[panel], mask.loc[panel], meta, imputer, settings.seed)})
@@ -100,6 +103,7 @@ def specification_curve(settings: Settings, omics: str = "lipidomics") -> pd.Dat
 
 
 def _impute(values, mask, meta, imputer, seed) -> pd.DataFrame:
+    """Run one imputer separately inside each region (regions differ too much to share information)."""
     completed = values.copy()
     for region in config.REGIONS:
         samples = region_samples(meta, region)
@@ -120,6 +124,7 @@ def _recovery_rmse(values, mask, meta, imputer, seed) -> float:
 
 
 def _plsda_p(values, meta, settings) -> dict:
+    """PLS-DA permutation p-value (MIA vs control, labels shuffled within sex) for each region."""
     result = {}
     for region in config.REGIONS:
         samples = region_samples(meta, region)
@@ -223,6 +228,7 @@ def _fit(frame: pd.DataFrame, formula: str, groups: str | None = None) -> dict:
 
 def _arm(values: pd.DataFrame, meta: pd.DataFrame, arm: str, region: str, formula: str,
          groups: str | None = None) -> pd.DataFrame:
+    """Fit one litter-aware model ("arm") to every feature of a region; BH-FDR within the arm."""
     frame = meta.rename(columns={config.GROUP_COL: "BioGroup", config.COHORT_COL: "Cohort"}).set_index("Sample")
     rows = []
     for feature, row in values.iterrows():
@@ -239,9 +245,11 @@ def cage_structure(settings: Settings, omics: str = "lipidomics") -> pd.DataFram
     out = settings.out(omics, "04_sensitivity", "cage_structure")
     prepared = prepare(settings, omics)
     values, meta = prepared.values, prepared.metadata
+    # Collection dates on which both groups were collected (used by arm D).
     both_groups = meta.groupby(config.COHORT_COL, observed=True)[config.GROUP_COL].nunique()
     matched_date = both_groups.index[both_groups.eq(2)]
 
+    # Summary of the litters: size, group, sexes, collection date.
     mice = meta.drop_duplicates(config.MOUSE_COL)
     cages = mice.groupby(config.CAGE_COL).agg(n_mice=(config.MOUSE_COL, "nunique"), group=(config.GROUP_COL, "first"),
                                               sexes=(config.SEX_COL, lambda s: ";".join(sorted(s.unique()))),

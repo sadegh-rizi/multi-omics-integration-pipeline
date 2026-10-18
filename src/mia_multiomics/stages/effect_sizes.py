@@ -127,6 +127,7 @@ def run(settings: Settings, population: str = config.PRIMARY_POPULATION) -> dict
     rng = np.random.default_rng(settings.seed)
 
     def score_test(score: pd.Series, m: pd.DataFrame, name: str) -> dict:
+        """Litter-aware MIA test of one per-sample score; keep the headline columns."""
         result = treatment_score_test(m.loc[score.index].reset_index(), score.reset_index(drop=True), score_name=name,
                                       n_mouse_permutations=settings.n_mouse_permutations)
         return {k: result[k] for k in ("observed_welch_t", "cage_permutation_p", "mouse_permutation_p",
@@ -210,6 +211,7 @@ def run(settings: Settings, population: str = config.PRIMARY_POPULATION) -> dict
 
 
 def _forest_plot(composites: pd.DataFrame, order: list[str], path) -> None:
+    """Per region: each composite's MIA effect in SD units, 95 % CI and leave-one-litter-out range."""
     fig, axes = plt.subplots(1, 3, figsize=(12, 4.2), sharey=True)
     for ax, region in zip(axes, config.REGIONS):
         c = composites[composites["Region"] == region].set_index("composite").reindex(order)

@@ -1,4 +1,24 @@
-"""Sex-stratified permutation diagnostics for the region-wise OLS model."""
+"""Permutation nulls for the region-wise OLS model (group x sex per feature).
+
+Why: with ~300 correlated features and 20 samples per region, the parametric
+p-values and their count of "hits" need a reference.  Shuffling the labels
+destroys any real group effect but keeps the correlation between features, so
+refitting the model on many shuffles shows how many small p-values appear by
+chance alone.
+
+The labels are shuffled at a chosen *exchangeability unit*:
+
+* ``'sample'``      - group labels shuffled between samples, within sex
+                      (ignores litters; the classical, too-optimistic null);
+* ``'cage'``        - whole litters keep one label; every possible assignment
+                      of litters to MIA/control is enumerated (exact test);
+* ``'within_cage'`` - labels shuffled inside each litter;
+* ``'block'``       - whole blocks (e.g. mice) shuffled within sex.
+
+:func:`run_permutation_null` is the entry point; it returns per-feature
+empirical p-values and FDR, per-permutation summaries, and an estimate of the
+effective number of independent tests.
+"""
 
 from __future__ import annotations
 
@@ -11,16 +31,24 @@ from scipy.stats import t as student_t
 from .clustered import cage_group_assignments, cage_permutation_ceiling
 from .common import bh_adjust, exact_empirical_p
 
+# Column of each effect in the design matrix built by _design_matrix
+# (column 0 is the intercept).
 EFFECTS = {
     "MIA vs Saline Control": 1,
     "Female vs Male": 2,
     "MIA x Female interaction": 3,
 }
+# Effects tested by shuffling the group label; the sex effect shuffles sex instead.
 _GROUP_PERMUTATION_EFFECTS = {"MIA vs Saline Control", "MIA x Female interaction"}
 
 
 def _empirical_null_fdr(observed_t: np.ndarray, null_statistics: np.ndarray) -> np.ndarray:
-    """Estimate FDR(t) from expected null discoveries at observed thresholds."""
+    """Estimate FDR(t) from expected null discoveries at observed thresholds.
+
+    For each observed |t| used as a threshold: FDR = (expected number of null
+    features at least this extreme) / (observed number at least this extreme).
+    ``null_statistics`` is features x permutations.
+    """
     observed_absolute = np.abs(observed_t)
     result = np.full(len(observed_absolute), np.nan, dtype=float)
     finite = np.isfinite(observed_absolute)
@@ -34,6 +62,8 @@ def _empirical_null_fdr(observed_t: np.ndarray, null_statistics: np.ndarray) -> 
     thresholds = np.sort(np.unique(observed_absolute[finite]))[::-1]
     raw_fdr: list[float] = []
     for threshold in thresholds:
+        # Each feature's chance of exceeding the threshold under the null, summed
+        # over features = expected number of null discoveries.
         observed_count = np.sum(observed_absolute >= threshold)
         hit_counts = np.sum(finite_null & (null_absolute >= threshold), axis=1)
         per_feature_rates = np.divide(
@@ -95,6 +125,13 @@ def _permute_column(
     exchangeability_unit: str,
     block_column: str | None,
 ) -> pd.Series:
+    """Shuffle ``target_column`` labels at the chosen unit, keeping ``stratify_column`` fixed.
+
+    sample      : shuffle within each stratum (e.g. group within sex)
+    within_cage : shuffle within each cage
+    cage        : draw one complete, valid assignment of labels to whole cages
+    block       : shuffle whole blocks (one label each) within strata
+    """
     required = {target_column, stratify_column}
     missing = required.difference(metadata.columns)
     if missing:
@@ -111,6 +148,7 @@ def _permute_column(
         return labels
 
     assert block_column is not None
+    # Whole cages: pick one of the enumerated cage -> group assignments at random.
     if exchangeability_unit == "cage":
         block_info = metadata.loc[:, [block_column, target_column]].drop_duplicates(block_column)
         if len(block_info) != metadata[block_column].nunique(dropna=False):
@@ -127,6 +165,8 @@ def _permute_column(
             labels.loc[positions] = rng.permutation(labels.loc[positions].to_numpy())
         return labels
 
+    # Whole blocks: every block must carry a single label and stratum, then the
+    # block labels are shuffled within each stratum and copied to their samples.
     block_info = metadata.loc[:, [block_column, stratify_column, target_column]].drop_duplicates(block_column)
     if len(block_info) != metadata[block_column].nunique(dropna=False):
         raise ValueError("Each block must have one stratum and target label.")
@@ -181,6 +221,7 @@ def permute_labels_for_effect(
 
 
 def _design_matrix(metadata: pd.DataFrame, group_values: Iterable[object] | None = None) -> np.ndarray:
+    """Columns: intercept, MIA (0/1), female (0/1), MIA x female - the same coding as the OLS formula."""
     if group_values is None:
         group_values = metadata["BioGroup"]
     group = pd.Series(group_values, index=metadata.index)
@@ -205,9 +246,11 @@ def _region_statistics(
     per feature, but avoids millions of repeated pandas model setup operations
     during the permutation loop.
     """
-    design = _design_matrix(metadata)
-    numeric = values.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    design = _design_matrix(metadata)                     # samples x 4
+    numeric = values.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)   # features x samples
     observed = np.isfinite(numeric)
+
+    # Which features have enough values in every group x sex cell to be fitted?
     groups = metadata["BioGroup"].to_numpy()
     sexes = metadata["Sex"].to_numpy()
     cell_masks = np.column_stack([
@@ -223,12 +266,16 @@ def _region_statistics(
             "t_statistic", "p_value", "residual_df", "n_usable",
         ])
 
+    # Weighted least squares with 0/1 weights: a missing value gets weight 0,
+    # which is the same as dropping that sample for that feature only.
+    # Solved for all features at once: beta_f = (X' W_f X)^-1 X' W_f y_f.
     weights = observed[eligible].astype(float)
     response = np.nan_to_num(numeric[eligible], nan=0.0)
     weighted_x = np.einsum("fi,ij,ik->fjk", weights, design, design)
     inverse = np.linalg.pinv(weighted_x)
     weighted_y = np.einsum("fi,ij->fj", weights * response, design)
     coefficients = np.einsum("fij,fj->fi", inverse, weighted_y)
+    # Residual variance and standard errors, feature by feature.
     fitted = coefficients @ design.T
     residuals = (response - fitted) * weights
     n_usable = observed[eligible].sum(axis=1).astype(int)
@@ -238,6 +285,7 @@ def _region_statistics(
         np.diagonal(inverse, axis1=1, axis2=2) * residual_variance[:, None],
         0,
     ))
+    # Keep the three effects of interest; t = estimate / SE, two-sided p from Student's t.
     term_indices = list(EFFECTS.values())
     effect_names = list(EFFECTS)
     estimates = coefficients[:, term_indices]
@@ -298,6 +346,7 @@ def _null_summary(
     permutation_scheme: str,
     permutation_caveat: str,
 ) -> pd.DataFrame:
+    """One row per permutation: quantiles of |t| over all features (how extreme chance gets)."""
     rows: list[dict[str, object]] = []
     for permutation in range(null_statistics.shape[1]):
         current = null_statistics[:, permutation]
@@ -357,6 +406,9 @@ def estimate_effective_tests(
             "effective_tests_status": "insufficient complete null features",
         }
 
+    # In every permutation, count the features with nominal p < alpha.  If the
+    # features were independent these counts would be binomial(M, alpha); their
+    # extra variance measures how correlated the features are.
     complete_null = null_statistics[complete]
     complete_df = residual_df[complete]
     null_p_values = 2 * student_t.sf(np.abs(complete_null), complete_df[:, None])
@@ -364,6 +416,7 @@ def estimate_effective_tests(
     mean_discoveries = float(np.mean(discovery_counts))
     variance_discoveries = float(np.var(discovery_counts, ddof=1)) if len(discovery_counts) > 1 else np.nan
     nominal_fraction = mean_discoveries / n_features
+    # Solve Var(K) = M_eff * p * (1 - p) * (M / M_eff)^2 for M_eff, clipped to [1, M].
     if not np.isfinite(variance_discoveries) or variance_discoveries <= 0:
         effective = float(n_features)
         status = "variance-degenerate; capped at complete null feature count"
@@ -422,6 +475,8 @@ def run_permutation_null(
 
     if exchangeability_unit in {"block", "within_cage", "cage"} and block_column is None:
         raise ValueError("block_column is required for block, within_cage, or cage exchangeability.")
+
+    # Metadata in value-column order with the short names used by the batched OLS.
     ordered = metadata.set_index("Sample", drop=False).loc[values.columns].copy()
     ordered = ordered.rename(columns={"Sample type": "Region", "Bio group": "BioGroup"})
     rng = np.random.default_rng(random_state)
@@ -432,6 +487,8 @@ def run_permutation_null(
     for region, region_metadata in ordered.groupby("Region", sort=False, observed=True):
         samples = region_metadata["Sample"].tolist()
         region_values = values.loc[:, samples]
+
+        # 1. Observed t statistics with the true labels.
         observed = _region_statistics(
             region_values,
             region_metadata.loc[samples, ["BioGroup", "Sex", *( [block_column] if block_column else [])]],
@@ -440,6 +497,9 @@ def run_permutation_null(
         if observed.empty:
             continue
         observed = observed.set_index(["Feature", "Effect"])
+
+        # 2. How many permutations per effect: all possible cage assignments for the
+        #    exact cage test (e.g. 28), otherwise n_permutations random shuffles.
         permutation_counts = {
             effect: (
                 len(cage_group_assignments(
@@ -457,6 +517,8 @@ def run_permutation_null(
             for effect in effects_to_run
         }
         feature_positions = {feature: position for position, feature in enumerate(values.index)}
+
+        # 3. Refit the model on every relabelled copy and store each feature's null t.
         for effect in effects_to_run:
             if exchangeability_unit == "cage" and effect in _GROUP_PERMUTATION_EFFECTS:
                 assignments = cage_group_assignments(
@@ -490,6 +552,8 @@ def run_permutation_null(
                     continue
                 for row in current.itertuples(index=False):
                     null_by_effect[effect][feature_positions[row.Feature], permutation] = row.t_statistic
+        # 4. Summarise each effect's null: per-permutation quantiles, effective number
+        #    of tests, and per-feature empirical p-values and FDR.
         for effect, null_statistics in null_by_effect.items():
             permutation_scheme = "BioGroup within Sex" if effect in _GROUP_PERMUTATION_EFFECTS else "Sex within BioGroup"
             if exchangeability_unit == "cage":
@@ -534,6 +598,9 @@ def run_permutation_null(
                     null_statistics[selected_positions],
                 ),
             })
+            # Empirical p = share of null |t| at least as large as the observed |t|
+            # ((1 + exceedances) / (1 + permutations) for random shuffles; exact
+            # enumeration for the cage test, whose smallest p is 1 / #assignments).
             empirical_p: list[float] = []
             valid_statistics: list[int] = []
             exceedance_counts: list[float] = []
@@ -578,7 +645,6 @@ def run_permutation_null(
             )
             observed_effect["n_valid_null_statistics"] = valid_statistics
             observed_effect["exchangeability_unit"] = exchangeability_unit
-            observed_effect["permutation_scheme"] = "BioGroup within Sex" if effect in _GROUP_PERMUTATION_EFFECTS else "Sex within BioGroup"
             observed_effect["permutation_scheme"] = permutation_scheme
             observed_effect["permutation_caveat"] = permutation_caveat
             for key, value in ceiling.items():

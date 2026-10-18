@@ -1,4 +1,9 @@
-"""Detectable-effect-size summaries and honest volcano plots."""
+"""How large would an MIA effect have to be to be detected?  And which features are FDR hits?
+
+* :func:`detectable_effect_sizes` - the minimum detectable effect (MDE) of each
+  feature at 80 % power, from its observed standard error;
+* :func:`fdr_hit_table` - the FDR hits per region and effect, ranked, with labels.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ def fdr_hit_table(effects: pd.DataFrame, *, top_n: int = 10) -> tuple[pd.DataFra
         hits["annotate"] = pd.Series(dtype=bool)
         hits["label"] = pd.Series(dtype=str)
         return hits, hits.copy()
+    # Rank hits within each region x effect by q, then p (feature name breaks ties).
     hits["_feature_sort_key"] = hits["Feature"].astype(str)
     hits = hits.sort_values(
         ["Region", "Effect", "p_value_fdr", "p_value", "_feature_sort_key"],
@@ -58,9 +64,11 @@ def detectable_effect_sizes(
     required = {"Feature", "Region", "Effect", "standard_error"}
     if missing := required.difference(effects.columns):
         raise KeyError(f"Differential results are missing columns: {sorted(missing)}")
+    # Only the MIA effect, and only features with a usable standard error.
     selected = effects.loc[effects["Effect"].eq(MIA_EFFECT)].copy()
     selected["standard_error"] = pd.to_numeric(selected["standard_error"], errors="coerce")
     selected = selected.loc[selected["standard_error"].gt(0)].copy()
+    # MDE = (z_{1-alpha/2} + z_{power}) x SE, e.g. (1.96 + 0.84) x SE = 2.8 x SE.
     z_multiplier = norm.ppf(1 - alpha / 2) + norm.ppf(target_power)
     selected["mde_log2"] = z_multiplier * selected["standard_error"]
     if "effect_scale" not in selected.columns:
@@ -76,6 +84,9 @@ def detectable_effect_sizes(
             observed_n = pd.to_numeric(region_effects["n_usable"], errors="coerce").median()
         else:
             observed_n = np.nan
+        # Second row: the same MDEs rescaled as if only `illustrative_litter_n` independent
+        # units (litters) were available - SE grows with sqrt(n_observed / n_litters).
+        litter_scale = np.sqrt(observed_n / illustrative_litter_n) if observed_n > 0 else np.nan
         summary_rows.extend([
             {
                 "Region": region,
@@ -93,15 +104,15 @@ def detectable_effect_sizes(
                 "Region": region,
                 "power_scale": "illustrative_litter_n",
                 "n_features": len(region_effects),
-                "median_standard_error": median_se * np.sqrt(observed_n / illustrative_litter_n) if observed_n > 0 else np.nan,
-                "mde_p10_log2": region_effects["mde_log2"].quantile(0.10) * np.sqrt(observed_n / illustrative_litter_n) if observed_n > 0 else np.nan,
-                "mde_median_log2": region_effects["mde_log2"].median() * np.sqrt(observed_n / illustrative_litter_n) if observed_n > 0 else np.nan,
-                "mde_p90_log2": region_effects["mde_log2"].quantile(0.90) * np.sqrt(observed_n / illustrative_litter_n) if observed_n > 0 else np.nan,
+                "median_standard_error": median_se * litter_scale,
+                "mde_p10_log2": region_effects["mde_log2"].quantile(0.10) * litter_scale,
+                "mde_median_log2": region_effects["mde_log2"].median() * litter_scale,
+                "mde_p90_log2": region_effects["mde_log2"].quantile(0.90) * litter_scale,
                 "observed_n_median": observed_n,
                 "illustrative_litter_n": illustrative_litter_n,
                 "alpha": alpha,
                 "target_power": target_power,
-                "note": "Illustration only; litter-aware model is deferred and litter identity is unresolved.",
+                "note": "Illustration only: observed SE rescaled to the number of litters; see 04_sensitivity/cage_structure for litter-aware models.",
             },
         ])
     return selected, pd.DataFrame(summary_rows)

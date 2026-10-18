@@ -1,4 +1,20 @@
-"""Paired regional contrasts and regional-signature persistence statistics."""
+"""Paired regional contrasts and regional-signature persistence statistics.
+
+Every mouse gives all three regions, so a region difference (e.g. cortex minus
+cerebellum) can be computed *within* each mouse: litter, sex and handling
+effects cancel.  The question is then whether MIA changes these within-mouse
+differences.
+
+Main steps (used by ``stages/region_persistence.py``):
+
+1. :func:`build_region_contrasts` - one mouse x feature matrix of differences per region pair;
+2. :func:`concordance_summary` - correlation of the control and MIA mean difference profiles;
+3. :func:`estimate_split_half_reliability` - how reproducible each group's profile is
+   (a profile measured with noise cannot correlate perfectly even with itself);
+4. :func:`disattenuated_concordance` - the correlation divided by that noise ceiling,
+   with a bootstrap interval (1.0 = profile fully preserved);
+5. :func:`one_sample_region_tests` and :func:`interaction_tests` - per-feature tests.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +47,7 @@ class RegionContrast:
 
     @property
     def n_mice(self) -> int:
+        """Number of mice with both regions of this contrast."""
         return len(self.metadata)
 
 
@@ -43,6 +60,7 @@ def _validate_matrix_and_metadata(
     region_column: str,
     group_column: str,
 ) -> None:
+    """Unique feature and sample IDs, metadata for every sample, and at most one sample per mouse and region."""
     required = {sample_column, mouse_column, region_column, group_column}
     missing = required.difference(metadata.columns)
     if missing:
@@ -91,6 +109,7 @@ def build_region_contrasts(
     if missing_regions:
         raise ValueError(f"Metadata is missing regions: {sorted(missing_regions)}")
 
+    # A mouse must have the same group and cage in all of its regions.
     for mouse, rows in metadata.groupby(mouse_column, observed=True):
         for column in (group_column, "Cage"):
             if column in rows and rows[column].nunique(dropna=False) != 1:
@@ -105,6 +124,7 @@ def build_region_contrasts(
 
     result: dict[str, RegionContrast] = {}
     for name, region_a, region_b in contrast_definitions:
+        # Mice that have both regions of this pair; others are left out of this pair only.
         if region_a not in region_rows or region_b not in region_rows:
             raise ValueError(f"Contrast {name!r} refers to an unknown region.")
         mouse_order = sorted(region_rows[region_a].index.intersection(region_rows[region_b].index), key=str)
@@ -113,10 +133,12 @@ def build_region_contrasts(
         right = region_rows[region_b].loc[mouse_order]
         sample_a = left[sample_column].tolist()
         sample_b = right[sample_column].tolist()
+        # Region A minus region B, column by column for the same mouse (log2 scale = log ratio).
         difference = values.loc[:, sample_a].copy()
         difference.columns = [str(mouse) for mouse in mouse_order]
         difference = difference.subtract(values.loc[:, sample_b].set_axis(difference.columns, axis=1))
 
+        # One metadata row per mouse (group, sex, cage, date, tissue masses of both samples).
         pair_metadata = pd.DataFrame(index=difference.columns)
         pair_metadata.index.name = "Mouse"
         pair_metadata["Sample"] = difference.columns
@@ -151,6 +173,7 @@ def build_region_contrasts(
 
 
 def _profile_summaries(left: pd.Series, right: pd.Series) -> dict[str, float]:
+    """Pearson and Spearman r and the regression slope of the MIA profile on the control profile."""
     valid = pd.concat([left.rename("control"), right.rename("mia")], axis=1).dropna()
     result = {
         "n_features": len(valid),
@@ -176,7 +199,11 @@ def concordance_summary(
     *,
     group_column: str = "Bio group",
 ) -> pd.DataFrame:
-    """Summarize agreement between the two group mean difference profiles."""
+    """Summarize agreement between the two group mean difference profiles.
+
+    Each profile is the mean over the group's mice of the per-feature region
+    difference; the correlation over features says how similar the two are.
+    """
     metadata = contrast.metadata
     groups = metadata[group_column]
     control = contrast.values.loc[:, metadata.loc[groups.eq(GROUPS[0]), "Sample"]].mean(axis=1)
@@ -200,7 +227,11 @@ def one_sample_region_tests(
     group_column: str = "Bio group",
     fdr_denominator: int | None = None,
 ) -> pd.DataFrame:
-    """Run one-sample t tests on each group's paired region differences."""
+    """Run one-sample t tests on each group's paired region differences.
+
+    Tests, per group and feature, whether the mean within-mouse difference is
+    zero (= does the feature differ between the two regions in this group?).
+    """
     if fdr_denominator is None:
         fdr_denominator = len(contrast.values.index)
     rows: list[dict[str, object]] = []
@@ -212,6 +243,7 @@ def one_sample_region_tests(
             mean = float(np.mean(observed)) if n else np.nan
             standard_deviation = float(np.std(observed, ddof=1)) if n >= 2 else np.nan
             standard_error = standard_deviation / np.sqrt(n) if n >= 2 else np.nan
+            # Edge cases: too few mice (no test) or zero variance (t is 0 or infinite).
             if n < 2 or not np.isfinite(standard_error):
                 statistic = p_value = ci_lower = ci_upper = np.nan
                 degrees_of_freedom = n - 1 if n else np.nan
@@ -258,6 +290,12 @@ def _welch_statistics(
     control_design_effect: float = 1.0,
     mia_design_effect: float = 1.0,
 ) -> dict[str, float]:
+    """Welch's t test of MIA minus control, with optional variance inflation per group.
+
+    A design effect > 1 inflates a group's variance to account for mice of one
+    litter being correlated (design effect = 1 + (litter size - 1) x ICC).
+    Degrees of freedom by the Welch-Satterthwaite formula.
+    """
     control = control[np.isfinite(control)]
     mia = mia[np.isfinite(mia)]
     n_control, n_mia = len(control), len(mia)
@@ -318,12 +356,19 @@ def interaction_tests(
     cluster_column: str = "Cage",
     fdr_denominator: int | None = None,
 ) -> pd.DataFrame:
-    """Test one group contrast of paired differences, with ICC sensitivities."""
+    """Test one group contrast of paired differences, with ICC sensitivities.
+
+    The region x MIA interaction for each feature: does the within-mouse region
+    difference differ between MIA and control mice?  Reported four times: as a
+    plain Welch test ('raw') and with the variance inflated by the litter ICC
+    (point estimate and both ends of its interval).
+    """
     if fdr_denominator is None:
         fdr_denominator = len(contrast.values.index) * len(REGION_CONTRASTS)
     metadata = contrast.metadata
     control_samples = metadata.loc[metadata[group_column].eq(GROUPS[0]), "Sample"]
     mia_samples = metadata.loc[metadata[group_column].eq(GROUPS[1]), "Sample"]
+    # Mean litter size per group, needed for the design effect.
     mean_cluster_size: dict[str, float] = {group: 1.0 for group in GROUPS}
     if cluster_column in metadata.columns:
         cluster_sizes = metadata.groupby([group_column, cluster_column], observed=True).size()
@@ -359,6 +404,7 @@ def interaction_tests(
             lower_icc = float(icc_indexed.loc[feature, "icc_q025"])
             upper_icc = float(icc_indexed.loc[feature, "icc_q975"])
         row.update({"icc": point_icc, "icc_q025": lower_icc, "icc_q975": upper_icc})
+        # Repeat the test with the variance inflated by each ICC scenario.
         for scenario, current_icc in zip(scenario_names[1:], (point_icc, lower_icc, upper_icc)):
             if np.isfinite(current_icc):
                 control_de = 1 + (mean_cluster_size[GROUPS[0]] - 1) * current_icc
@@ -425,6 +471,8 @@ def estimate_split_half_reliability(
             valid = np.array([], dtype=float)
         else:
             correlations: list[float] = []
+            # Split the group's mice randomly in two halves, correlate the two half-profiles,
+            # and step the correlation up to full size with Spearman-Brown: 2r / (1 + r).
             for split in range(n_splits):
                 shuffled = rng.permutation(samples)
                 midpoint = len(shuffled) // 2
@@ -469,6 +517,7 @@ def _array_profile_mean(values: np.ndarray) -> np.ndarray:
 
 
 def _array_profile_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    """Pearson correlation over the features observed in both profiles (NaN if fewer than 3)."""
     valid = np.isfinite(left) & np.isfinite(right)
     if valid.sum() < 3:
         return np.nan
@@ -522,6 +571,8 @@ def disattenuated_concordance(
     """
     if n_bootstraps < 1 or n_inner_splits < 1:
         raise ValueError("Bootstrap and inner split counts must be positive.")
+    # Point estimate: observed r divided by the attenuation ceiling sqrt(rel_control x rel_mia),
+    # the largest correlation two noisy profiles could reach if the true profiles were identical.
     observed = concordance_summary(contrast, group_column=group_column).iloc[0]
     relevant = reliability_summary.loc[reliability_summary["Contrast"].eq(contrast.name)].set_index("Group")
     point = {group: float(relevant.loc[group, "reliability_mean"]) for group in GROUPS}
@@ -537,6 +588,9 @@ def disattenuated_concordance(
         group: contrast.values.loc[:, group_samples[group]].to_numpy(dtype=float)
         for group in GROUPS
     }
+    # Bootstrap: resample mice within each group, and recompute both the correlation and the
+    # reliabilities inside every draw (reusing the original reliabilities would understate
+    # the uncertainty).
     bootstrap_estimates: list[float] = []
     for _ in range(n_bootstraps):
         profiles = {}

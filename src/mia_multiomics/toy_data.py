@@ -171,6 +171,7 @@ def lipid_names(rng: np.random.Generator) -> pd.DataFrame:
 
 
 def metabolite_names(rng: np.random.Generator) -> pd.DataFrame:
+    """Invented metabolite panel with pathways and acquisition modes (HILIC +/-)."""
     rows = []
     for i in range(N_METABOLITES):
         rows.append({
@@ -186,6 +187,7 @@ def metabolite_names(rng: np.random.Generator) -> pd.DataFrame:
 
 
 def protein_names(rng: np.random.Generator) -> pd.DataFrame:
+    """Protein panel: the named marker / module genes plus anonymous Gene#### entries."""
     letters = np.array(list(string.ascii_uppercase))
     genes = list(NAMED_GENES) + [f"Gene{i:04d}" for i in range(1, N_PROTEINS - len(NAMED_GENES) + 1)]
     ids = set()
@@ -335,6 +337,7 @@ def _vendor_sample_order(samples: pd.DataFrame) -> pd.DataFrame:
 
 def _write_report_workbook(path: Path, samples: pd.DataFrame, lipids: pd.DataFrame, lipid_data: tuple,
                            metabolites: pd.DataFrame, metabolite_data: tuple) -> None:
+    """The facility's Excel report: sample sheet, lipidomics and metabolomics sheets, in the vendor layout."""
     ordered = _vendor_sample_order(samples)
     positions = ordered.index.to_numpy()
 
@@ -379,6 +382,7 @@ def _write_report_workbook(path: Path, samples: pd.DataFrame, lipids: pd.DataFra
 
 
 def _write_cage_workbook(path: Path, samples: pd.DataFrame) -> None:
+    """The cage / collection-date workbook (one row per sample)."""
     rows = []
     for _, s in samples.iterrows():
         first = s["Sample type"] == REGION_ORDER_IN_MOUSE[0]   # mouse-level values only on the first row
@@ -393,6 +397,7 @@ def _write_cage_workbook(path: Path, samples: pd.DataFrame) -> None:
 
 
 def _write_proteomics(path: Path, region: str, samples: pd.DataFrame, proteins: pd.DataFrame, values: np.ndarray) -> None:
+    """One Perseus-style text export per region (with the "#!" annotation rows Perseus writes)."""
     region_samples = samples[samples["Sample type"].eq(region)].sort_values(["Bio group", "Sample number"], ascending=[False, True])
     columns = {}
     for position, s in region_samples.iterrows():
@@ -419,6 +424,7 @@ def _write_proteomics(path: Path, region: str, samples: pd.DataFrame, proteins: 
 
 
 def _write_gene_sets(reference_dir: Path, rng: np.random.Generator, proteins: pd.DataFrame) -> None:
+    """Toy GO and Reactome GMT files: real-looking terms for the planted modules plus random terms."""
     reference_dir.mkdir(parents=True, exist_ok=True)
     gene_of = dict(zip(proteins["Gene"], proteins["Protein ID"]))
     others = [g for g in proteins["Gene"] if g.startswith("Gene")]

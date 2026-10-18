@@ -61,6 +61,7 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
     """Fit ASCA+ for every scaling, test effects by permutation; return the variance table."""
     plotting.apply_plot_style()
     out = settings.out(omics, "06_asca", population)
+    # ASCA needs a complete matrix: keep only features observed in every sample.
     prepared = prepare(settings, omics, population)
     values = complete_features(prepared.values)
     meta = prepared.metadata.set_index("Sample").loc[list(values.columns)].reset_index()
@@ -68,6 +69,8 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
     write_csv(values.rename_axis("Feature").reset_index(), out / "inputs" / "complete_feature_matrix.csv")   # also read by r/asca_crosscheck.R
     write_csv(meta, out / "inputs" / "metadata.csv")
 
+    # 1. Fit ASCA+ under every scaling; for each effect keep its variance share, loadings
+    #    (with bootstrap intervals for the primary scaling) and effect+residual projection.
     fits, variances, loadings, projections = {}, [], [], []
     for scaling in SCALING_MODES:
         fit = fit_asca(values, meta, scaling=scaling)
@@ -90,12 +93,14 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
     write_csv(pd.concat(projections, ignore_index=True), out / "effect_residual_projection.csv")
     write_csv(_scores(fits[PRIMARY_SCALING], meta), out / "scores_autoscaled.csv")
 
+    # 2. Permutation tests of every effect at its proper exchangeability unit.
     tests, null = permutation_tests(fits, meta, settings)
     write_csv(tests, out / "permutation_tests.csv")
     write_csv(null, out / "permutation_null_ssq.csv")
     _composite_figure(fits[PRIMARY_SCALING], variance.loc[variance["Scaling"].eq(PRIMARY_SCALING)], tests,
                       loading_table.loc[loading_table["Scaling"].eq(PRIMARY_SCALING)], omics, out / "figures")
 
+    # 3. Null calibration and power simulation (by default only for the primary population).
     if power if power is not None else population == config.PRIMARY_POPULATION:
         calibration, spikes = power_simulation(fits[PRIMARY_SCALING], meta, settings)
         write_csv(calibration, out / "power_null_calibration.csv")
@@ -107,6 +112,7 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
 
 
 def _scores(fit, meta: pd.DataFrame) -> pd.DataFrame:
+    """Long table of the first two PCA scores of every effect matrix, with sample metadata."""
     rows = []
     for effect in EFFECT_ORDER:
         scores, _, _ = effect_svd(fit, effect)
@@ -119,6 +125,8 @@ def _scores(fit, meta: pd.DataFrame) -> pd.DataFrame:
 
 def _bootstrap_intervals(values: pd.DataFrame, meta: pd.DataFrame, fit, settings: Settings) -> dict[str, pd.DataFrame]:
     """95 % loading intervals from a mouse bootstrap (stratified by group x sex), Procrustes-aligned."""
+    # Bootstrap loadings are rotated (Procrustes) onto the original loadings before taking
+    # quantiles, because PCA components can swap order or sign between resamples.
     references = {effect: effect_svd(fit, effect)[1] for effect in BOOTSTRAP_EFFECTS}
     draws = {effect: [] for effect in BOOTSTRAP_EFFECTS}
     source = values.to_numpy(dtype=float).T
@@ -146,6 +154,8 @@ def permutation_tests(fits: dict, meta: pd.DataFrame, settings: Settings) -> tup
     """Effect sum of squares vs its permutation null, for every scaling."""
     prepared = {scaling: fit.prepared_data for scaling, fit in fits.items()}
     n, seed = settings.n_asca_permutations, settings.seed
+    # Each engine: (name, effects it tests, shuffle unit, relabelled metadata tables).
+    # "Group (mouse)" ignores litters on purpose, as the liberal comparison.
     engines = [
         ("Region", ("Region",), "region within mouse", region_label_permutations(meta, n_random=n, random_state=seed)),
         ("Group (cage)", ("Group", "Region:Group"), "whole cage", cage_group_permutations(meta)),
@@ -159,6 +169,7 @@ def permutation_tests(fits: dict, meta: pd.DataFrame, settings: Settings) -> tup
                 for effect, ssq in statistics.items():
                     null_rows.append({"Engine": engine, "Unit": unit, "Permutation": permutation_id,
                                       "Scaling": scaling, "Effect": effect, "SSQ": ssq})
+    # p-value of each effect = share of permutations whose effect sum of squares is at least the observed one.
     null = pd.DataFrame(null_rows)
     tests = []
     for (engine, unit, scaling, effect), group in null.groupby(["Engine", "Unit", "Scaling", "Effect"], sort=False):
@@ -182,9 +193,12 @@ def _residual_factor(fit) -> np.ndarray:
 def power_simulation(fit, meta: pd.DataFrame, settings: Settings) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(1) p-values on simulated null data should be uniform; (2) detection rate of planted effects."""
     rng = np.random.default_rng(settings.seed)
+    # Simulated data have the residual covariance of the real data but no design effects.
     factor = _residual_factor(fit)
     n_perm = settings.n_power_permutations
     ssq = lambda data, m, effect: effect_ssq_by_scaling({fit.scaling: data}, m, (effect,))[fit.scaling][effect]  # noqa: E731
+    # (1) Calibration: on effect-free data the permutation p-values must be uniform
+    #     (rejection rate ~5 % at alpha 0.05, KS test against the uniform).
     calibration = []
     for dataset in range(settings.n_power_datasets):
         data = rng.normal(size=(fit.n_samples, factor.shape[1])) @ factor.T
@@ -198,6 +212,8 @@ def power_simulation(fit, meta: pd.DataFrame, settings: Settings) -> tuple[pd.Da
         ks_p_value=lambda p: float(kstest(p, "uniform").pvalue)).reset_index()
     calibration = pd.concat([calibration, summary.assign(dataset="summary")], ignore_index=True)
 
+    # (2) Power: add a Region x Group effect of `shift` SD to `n_features` features of MIA
+    #     samples and count how often the cage and mouse permutation tests detect it.
     profile = make_spike_profile(meta)
     mia = meta[config.GROUP_COL].eq(config.MIA).to_numpy(dtype=float)
     cages = list(cage_group_permutations(meta))
@@ -217,6 +233,7 @@ def power_simulation(fit, meta: pd.DataFrame, settings: Settings) -> tuple[pd.Da
 
 
 def _composite_figure(fit, variance: pd.DataFrame, tests: pd.DataFrame, loadings: pd.DataFrame, omics: str, out) -> None:
+    """Four panels: variance shares vs null, Region scores, Region:Group scores, top Region loadings."""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8.5), constrained_layout=True)
     shown = variance.loc[~variance["Effect"].isin(["Residual"])]
     axes[0, 0].bar(range(len(shown)), shown["variance_share"], color=plotting.COLORBLIND_COLORS[0])
@@ -233,7 +250,7 @@ def _composite_figure(fit, variance: pd.DataFrame, tests: pd.DataFrame, loadings
         labels = fit.metadata[color_by].astype(str).to_numpy()
         ax.scatter(scores.iloc[:, 0], scores.iloc[:, 1] if scores.shape[1] > 1 else np.zeros(len(scores)),
                    c=[colors[label] for label in labels], edgecolor="black", linewidth=0.3)
-        ax.set(xlabel="PC1", ylabel="PC2", title=f"{effect} effect + residual, coloured by {color_by}")
+        ax.set(xlabel="PC1", ylabel="PC2", title=f"{effect} effect scores, coloured by {color_by}")
     top = loadings.loc[loadings["Effect"].eq("Region") & loadings["Component"].eq("PC1")].nlargest(15, "absolute_loading").sort_values("Loading")
     axes[1, 1].barh(top["Feature"].astype(str), top["Loading"], color=plotting.COLORBLIND_COLORS[2])
     axes[1, 1].set(xlabel="Region PC1 loading", title="Strongest region loadings")

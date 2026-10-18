@@ -1,5 +1,17 @@
 """Lipid-specific helpers: parse chain length / double bonds from lipid names,
-and summarise species into classes, structural indices and compositional shares."""
+and summarise species into classes, structural indices and compositional shares.
+
+Why summarise?  Hundreds of individual species give hundreds of noisy tests.
+Biologically meaningful summaries (a class, the mean chain length, the share of
+PUFA-containing lipids) are fewer, less noisy and easier to interpret.
+
+* :func:`parse_lipid_structure`, :func:`annotate_lipid_structures` - read
+  "PC(16:0_18:1)" as total chain length 34 and 1 double bond;
+* :func:`aggregate_class_profiles` - one mean (or median) log2 profile per class;
+* :func:`structural_index_profiles` - chain length, double bonds, PUFA fraction per sample;
+* :func:`build_lipid_summary_features` - the fixed panel of compositional shares used by
+  the cross-omics screen.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +20,7 @@ import re
 import numpy as np
 import pandas as pd
 
-_CHAIN_RE = re.compile(r"(?<!\d)(\d+):(\d+)")
+_CHAIN_RE = re.compile(r"(?<!\d)(\d+):(\d+)")       # "18:1" -> chain length 18, 1 double bond
 _STRUCTURAL_METRICS = (
     "mean_chain_length",
     "mean_double_bond_count",
@@ -106,6 +118,7 @@ def aggregate_class_profiles(
         raise ValueError("Every value feature must have an annotation row.")
     class_values: list[pd.Series] = []
     class_annotations: list[dict[str, object]] = []
+    # One profile per class: mean (or median) over its species, sample by sample.
     for lipid_class, class_annotations_frame in annotations.loc[values.index].groupby(
         "Lipid Class", sort=True, dropna=False
     ):
@@ -151,6 +164,7 @@ def structural_index_profiles(
         empty_annotations = pd.DataFrame(columns=["Lipid Name", "Lipid Class", "Metric", "Scope"])
         return empty_values, empty_annotations, pd.DataFrame()
 
+    # Indices are computed for all parsed lipids ("Overall") and for each class separately.
     scopes: list[tuple[str, pd.Index]] = [("Overall", parsed.index)]
     for lipid_class, frame in parsed.groupby("Lipid Class", sort=True, dropna=False):
         if pd.isna(lipid_class) or str(lipid_class).strip() == "":
@@ -166,6 +180,7 @@ def structural_index_profiles(
             feature_id = f"structural::{scope}::{metric}"
             profile_values: dict[str, float] = {}
             for sample in values.columns:
+                # Only the lipids observed in this sample count (missing values are not imputed).
                 available = values.loc[feature_index, sample].notna()
                 current = structure_frame.loc[available]
                 n_features = len(current)
@@ -176,6 +191,7 @@ def structural_index_profiles(
                 double_bonds = current["total_double_bond_count"].to_numpy(dtype=float)
                 saturated = np.sum(double_bonds == 0)
                 unsaturated = np.sum(double_bonds > 0)
+                # PUFA status is undefined for lipids whose chains could not be resolved.
                 determinate_pufa = current.loc[~current["structural_ambiguous"]]
                 determinate_double_bonds = determinate_pufa["total_double_bond_count"].to_numpy(dtype=float)
                 n_ambiguous_pufa_features = int(current["structural_ambiguous"].sum())
@@ -215,13 +231,13 @@ def structural_index_profiles(
     )
 
 
-
 # ---------------------------------------------------------------- compositional summaries
 _ETHER_RE = re.compile(r"(?:^|[(_])(?:O-|P-)")
 _SPHINGOLIPID_CLASSES = frozenset({"Cer", "SM", "Hex1Cer", "Hex2Cer", "GD1a", "GD1b", "GM1", "GM2", "GM3"})
 
 
 def _mean_profile(values: pd.DataFrame, features: pd.Index, name: str) -> pd.Series:
+    """Mean over the given feature columns, per sample (``values`` is samples x features here)."""
     if len(features) == 0:
         raise ValueError(f"Cannot build empty lipid summary {name}.")
     return values.loc[:, features].mean(axis=1).rename(name)
@@ -250,17 +266,20 @@ def build_lipid_summary_features(
     definitions: list[dict[str, object]] = []
 
     def add(name: str, feature_mask: pd.Series, description: str) -> None:
+        """Add one summary: the mean within-sample share of the lipids in ``feature_mask``."""
         selected = annotations.index[feature_mask.to_numpy()]
         if len(selected) == 0:
             return
         rows.append(_mean_profile(shares, selected, name))
         definitions.append({"Feature": name, "description": description, "n_source_lipids": len(selected)})
 
+    # 1. Share of each lipid class.
     class_counts = annotations["Lipid Class"].value_counts()
     for lipid_class in class_counts.index.sort_values():
         mask = annotations["Lipid Class"].eq(lipid_class)
         add(f"class_share::{lipid_class}", mask, f"Mean within-sample share of {lipid_class} features")
 
+    # 2. Ether lipids, arachidonic (20:4) and DHA (22:6) chains, very-long-chain sphingolipids.
     for name, mask, description in (
         ("ether_share", annotations["Lipid Name"].astype(str).str.contains(_ETHER_RE), "Ether lipid share"),
         ("ester_share", ~annotations["Lipid Name"].astype(str).str.contains(_ETHER_RE), "Non-ether lipid share"),
@@ -274,6 +293,7 @@ def build_lipid_summary_features(
     ):
         add(name, mask, description)
 
+    # 3. Bins of chain length and of double-bond count.
     for name, mask in (
         ("chain_length_le_16", structures["total_chain_length"].le(16)),
         ("chain_length_17_18", structures["total_chain_length"].between(17, 18)),
@@ -287,12 +307,13 @@ def build_lipid_summary_features(
     ):
         add(name, mask.fillna(False), f"Mean within-sample share for {name.replace('_', ' ')}")
 
+    # 4. Overall structural indices.
     for metric in ("mean_chain_length", "mean_double_bond_count", "pufa_fraction", "saturated_to_unsaturated_ratio"):
         feature = f"structural::Overall::{metric}"
         rows.append(structural_profiles[feature].rename(feature))
         definitions.append({"Feature": feature, "description": f"Overall structural index: {metric}", "n_source_lipids": len(structures)})
 
-    # Add structural summaries for the 10 largest classes to keep the panel
+    # 5. Structural summaries for the 10 largest classes to keep the panel
     # interpretable and within the planned approximately 60-80 features.
     for lipid_class in class_counts.nlargest(10).index.sort_values():
         class_index = structures.index[structures["Lipid Class"].eq(lipid_class)]

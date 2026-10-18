@@ -38,6 +38,7 @@ def mouse_grouped_folds(metadata: pd.DataFrame, *, n_splits: int = 5, n_repeats:
 
 
 def _mouse_means(metadata: pd.DataFrame, scores: pd.Series, labels: pd.Series) -> pd.DataFrame:
+    """One row per mouse: its mean score over regions, its cage and its group label."""
     frame = pd.DataFrame({"Mouse": metadata[config.MOUSE_COL].to_numpy(), "Cage": metadata[config.CAGE_COL].to_numpy(),
                           "Score": np.asarray(scores, dtype=float), "Group": np.asarray(labels)})
     return frame.groupby("Mouse", sort=False).agg(Score=("Score", "mean"), Cage=("Cage", "first"),

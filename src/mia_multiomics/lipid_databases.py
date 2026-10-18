@@ -68,6 +68,7 @@ def _request(url: str) -> Any:
 
 
 def _cached_request(cache_dir: Path, source: str, key: str, url: str) -> Any:
+    """GET ``url`` once and cache the JSON response on disk, so reruns work offline."""
     path = _cache_path(cache_dir, source, key)
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))["response"]
@@ -143,6 +144,7 @@ def map_lipid_ids(annotations: pd.DataFrame, cache_dir: Path) -> pd.DataFrame:
 
 
 def _kegg_pathway_names(cache_dir: Path) -> dict[str, str]:
+    """KEGG pathway ID -> pathway name, from the KEGG pathway list."""
     response = _cached_request(cache_dir, "kegg", "pathway_list", f"{KEGG_URL}/list/pathway")
     if not isinstance(response, str):
         raise ValueError("Unexpected KEGG pathway-list response.")
@@ -154,6 +156,7 @@ def _kegg_pathway_names(cache_dir: Path) -> dict[str, str]:
 
 
 def _kegg_pathway_ids(kegg_id: str, cache_dir: Path) -> list[str]:
+    """KEGG pathways linked to one KEGG compound ID."""
     response = _cached_request(cache_dir, "kegg", f"pathways_{kegg_id}", f"{KEGG_URL}/link/pathway/{quote(kegg_id, safe=':')}")
     if not isinstance(response, str):
         raise ValueError(f"Unexpected KEGG pathway response for {kegg_id!r}.")

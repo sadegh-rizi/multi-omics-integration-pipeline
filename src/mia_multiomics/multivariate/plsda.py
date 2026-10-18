@@ -1,4 +1,11 @@
-"""Exploratory PLS-DA scores and stratified permutation diagnostics."""
+"""Exploratory PLS-DA scores and their permutation test.
+
+PLS-DA finds the directions that best *separate the given labels*, so its score
+plot shows separated groups even when the groups do not differ.  The only valid
+reading is through a permutation test: refit on shuffled labels many times and
+ask whether the real separation is larger than the shuffled ones
+(:func:`permutation_test_plsda`).
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,7 @@ from sklearn.cross_decomposition import PLSRegression
 
 
 def _align_series(values: pd.DataFrame, series: pd.Series, name: str) -> pd.Series:
+    """``series`` (indexed by sample) reordered to the value columns; no sample may be missing."""
     if values.columns.has_duplicates:
         raise ValueError("PLS-DA sample identifiers must be unique.")
     if series.index.has_duplicates:
@@ -27,6 +35,7 @@ def _validate_values(
     labels: pd.Series,
     n_components: int,
 ) -> tuple[pd.DataFrame, pd.Series]:
+    """Complete numeric values, a feasible number of components and at least two label groups."""
     numeric = values.apply(pd.to_numeric, errors="coerce")
     if numeric.isna().to_numpy().any():
         raise ValueError("PLS-DA requires complete values; do not impute missing values.")
@@ -39,6 +48,7 @@ def _validate_values(
 
 
 def _cumulative_x_variance(model: PLSRegression, values: pd.DataFrame) -> np.ndarray:
+    """Cumulative share of the X variance explained by the PLS components (removed one at a time)."""
     centered = values.T.to_numpy(dtype=float)
     centered = centered - centered.mean(axis=0, keepdims=True)
     total_sum_squares = float(np.square(centered).sum())
@@ -66,6 +76,7 @@ def fit_plsda(
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Fit exploratory PLS-DA and return sample scores and cumulative X variance."""
     numeric, aligned_labels = _validate_values(values, labels, n_components)
+    # PLS regression of the 0/1 group indicators on the (samples x features) matrix.
     response = pd.get_dummies(aligned_labels, dtype=float)
     model = PLSRegression(n_components=n_components, scale=False)
     model.fit(numeric.T.to_numpy(dtype=float), response.to_numpy(dtype=float))
@@ -78,6 +89,7 @@ def fit_plsda(
 
 
 def _centroid_separation(scores: pd.DataFrame, labels: pd.Series) -> float:
+    """Mean distance between the group centroids in the PLS score space (the test statistic)."""
     centroids = scores.assign(_group=labels.to_numpy()).groupby(
         "_group", observed=True
     ).mean()
@@ -107,14 +119,17 @@ def permutation_test_plsda(
     numeric, aligned_labels = _validate_values(values, labels, n_components)
     aligned_strata = _align_series(numeric, strata, "Permutation strata")
 
+    # Observed separation with the true labels.
     observed_scores, _ = fit_plsda(numeric, aligned_labels, n_components=n_components)
     observed_separation = _centroid_separation(observed_scores, aligned_labels)
     rng = np.random.default_rng(random_state)
     permuted_separations = np.empty(n_permutations)
 
+    # Null: refit PLS-DA on relabelled data and record the separation each time.
     for permutation_index in range(n_permutations):
         permuted_labels = aligned_labels.copy()
         if exchangeability_unit == "cage":
+            # Whole cages keep one label; the cage labels are shuffled.
             cluster_frame = pd.DataFrame({"cluster": aligned_strata, "label": aligned_labels})
             cluster_labels = cluster_frame.groupby("cluster", observed=True)["label"].nunique()
             if cluster_labels.ne(1).any():
@@ -126,6 +141,7 @@ def permutation_test_plsda(
             mapping = dict(zip(cluster_names, shuffled))
             permuted_labels = aligned_strata.map(mapping)
         else:
+            # Shuffle labels within each stratum (e.g. within sex, or within cage).
             for _, sample_index in aligned_strata.groupby(
                 aligned_strata, observed=True
             ).groups.items():
@@ -139,6 +155,7 @@ def permutation_test_plsda(
             permuted_scores, permuted_labels
         )
 
+    # p = (1 + permutations at least as separated) / (1 + permutations).
     result = pd.Series({
         "observed_centroid_separation": observed_separation,
         "permutation_p_value": (

@@ -81,6 +81,7 @@ def _overlap(data, samples_log2: pd.DataFrame, thresholds: pd.DataFrame) -> pd.D
 
 
 def _plot(curves: pd.DataFrame, thresholds: pd.DataFrame, out) -> None:
+    """Curves per region and for Tech-Mix, with the candidate noise floors as vertical lines."""
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     colors = {**plotting.BRAIN_REGION_COLORS, "Tech-Mix": "#444444"}
     for source, curve in curves.groupby("source"):

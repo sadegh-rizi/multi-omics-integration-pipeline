@@ -1,4 +1,14 @@
-"""Cage-level summaries and small-sample clustering diagnostics."""
+"""Cage (litter) statistics.
+
+Pups of one litter share a mother, a cage and a collection date, so they are
+not independent; the litter is the experimental unit for MIA.  This module:
+
+* collapses samples to one mean per cage (:func:`collapse_to_cage_means`);
+* estimates how similar littermates are (intraclass correlation, :func:`intraclass_correlation`);
+* enumerates every possible assignment of whole cages to MIA / control
+  (:func:`cage_group_assignments`) for the exact cage permutation test, and
+  reports its smallest attainable p-value (:func:`cage_permutation_ceiling`).
+"""
 
 from __future__ import annotations
 
@@ -15,6 +25,7 @@ def _aligned_metadata(
     *,
     sample_column: str,
 ) -> pd.DataFrame:
+    """Metadata rows in the order of the value columns, after basic checks."""
     if values.columns.has_duplicates:
         raise ValueError("Values must have unique sample columns.")
     required = {sample_column, "Cage", "Bio group"}
@@ -30,6 +41,7 @@ def _aligned_metadata(
 
 
 def _one_value_per_cage(metadata: pd.DataFrame, column: str) -> None:
+    """Raise if a cage has more than one value of ``column`` (e.g. two treatment groups)."""
     if column not in metadata:
         return
     counts = metadata.groupby("Cage", observed=True)[column].nunique(dropna=False)
@@ -49,10 +61,12 @@ def collapse_to_cage_means(
     _one_value_per_cage(aligned, "Date collected")
     _one_value_per_cage(aligned, "Collection cohort")
 
+    # Mean of each feature over the samples of a cage (missing values ignored).
     numeric = values.loc[:, aligned[sample_column]].apply(pd.to_numeric, errors="coerce")
     cage_values = numeric.T.assign(Cage=aligned["Cage"].to_numpy())
     cage_values = cage_values.groupby("Cage", sort=False, observed=True).mean(numeric_only=True).T
 
+    # One metadata row per cage; a cage with pups of both sexes is labelled "Mixed".
     rows: list[dict[str, object]] = []
     for cage, cage_rows in aligned.groupby("Cage", sort=False, observed=True):
         row: dict[str, object] = {
@@ -77,6 +91,11 @@ def collapse_to_cage_means(
 
 
 def _icc_one_feature(groups: list[np.ndarray]) -> float:
+    """One-way ANOVA ICC from a list of per-cage value arrays.
+
+    ICC = (MS_between - MS_within) / (MS_between + (k - 1) MS_within), with k the
+    mean cage size: the share of variance due to differences between cages.
+    """
     groups = [group[np.isfinite(group)] for group in groups]
     groups = [group for group in groups if len(group) >= 2]
     if len(groups) < 2:
@@ -123,6 +142,7 @@ def intraclass_correlation(
         groups = [group[np.isfinite(group)] for group in groups]
         groups = [group for group in groups if len(group) >= 2]
         observed = _icc_one_feature(groups)
+        # Cluster bootstrap: resample whole cages with replacement.
         bootstrap = np.full(n_bootstraps, np.nan, dtype=float)
         if len(groups) >= 2:
             for number in range(n_bootstraps):
@@ -138,7 +158,7 @@ def intraclass_correlation(
             "n_usable_samples": sum(len(group) for group in groups),
             "n_bootstraps": n_bootstraps,
             "interval_method": "cage bootstrap percentile interval",
-            "design_parameter_caveat": "Four multi-pup cages provide a weak, interval-only design estimate.",
+            "design_parameter_caveat": f"{len(groups)} multi-pup cages provide a weak, interval-only design estimate.",
         })
     return pd.DataFrame(rows)
 
@@ -150,7 +170,11 @@ def cage_group_assignments(
     group_column: str = "Bio group",
     target_group: str = "MIA",
 ) -> list[pd.Series]:
-    """Enumerate every whole-cage assignment preserving group counts."""
+    """Enumerate every whole-cage assignment preserving group counts.
+
+    With 8 cages of which 6 are MIA there are C(8, 6) = 28 ways to choose the MIA
+    cages; each returned Series gives one such relabelling for every sample.
+    """
     required = {cage_column, group_column}
     missing = required.difference(metadata.columns)
     if missing:
@@ -184,7 +208,12 @@ def cage_permutation_ceiling(
     target_group: str = "MIA",
     fdr_denominator: int | None = None,
 ) -> dict[str, object]:
-    """Return the exact assignment count and empirical-p ceiling."""
+    """Return the exact assignment count and empirical-p ceiling.
+
+    The smallest p-value an exact cage permutation test can give is
+    1 / (number of assignments), e.g. 1/28 = 0.036; with BH over many features
+    the smallest attainable q is (number of features) / (number of assignments).
+    """
     cage_info = metadata.loc[:, [cage_column, group_column]].drop_duplicates(cage_column)
     n_cages = len(cage_info)
     n_target = int(cage_info[group_column].eq(target_group).sum())

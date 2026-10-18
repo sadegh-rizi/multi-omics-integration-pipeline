@@ -39,6 +39,7 @@ def scree_grouped(view: View, n_components: int = 10) -> plt.Figure:
 
 
 def _attribution(view: View, scope: str) -> pd.DataFrame:
+    """Marginal R² of each design factor for PC1-PC5 of one scope."""
     model, scores, _ = view.pca(scope)
     meta = view.metadata.copy()
     meta["Date collected"] = pd.to_datetime(meta["Date collected"]).dt.strftime("%Y-%m-%d")
@@ -102,6 +103,7 @@ def pca_hotelling(view: View, region: str = "Cortex") -> plt.Figure:
 
 # ---------------------------------------------------------------- loadings
 def loadings_lollipop(view: View, scope: str = "pooled", component: str = "PC 1", n_features: int | None = None) -> plt.Figure:
+    """The strongest loadings (by absolute value) of one component."""
     _, _, loadings = view.pca(scope)
     n_features = n_features or view.options.top_n
     top = loadings[component].abs().nlargest(n_features).index

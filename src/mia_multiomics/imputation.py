@@ -1,4 +1,20 @@
-"""Censoring-aware, label-free imputation for regional lipidomics matrices."""
+"""Censoring-aware, label-free imputation for regional lipidomics matrices.
+
+The main analysis never imputes.  These imputers exist only for sensitivity
+analyses (does the answer change if missing values are filled in?).
+
+A missing value can mean two different things, and they need different fills:
+
+* **left-censored** - the peak was zero or below the detection limit: the true
+  value is *small*, so it gets half the feature minimum ("half-min");
+* **missing at random (MAR)** - absent from the delivered file for no
+  abundance-related reason: predicted from the other features by a random
+  forest (``IterativeImputer``).
+
+The imputers never see the group labels ("label-free"), so they cannot create
+a group difference.  Each returns the completed values and a same-shaped table
+saying which route filled every cell.
+"""
 
 from __future__ import annotations
 
@@ -29,6 +45,7 @@ def censoring_mask(intensity: pd.DataFrame, below_detection: pd.DataFrame) -> pd
 
 
 def _validate(values: pd.DataFrame, mask: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Numeric values and a censoring mask of exactly the same shape and labels."""
     numeric = values.apply(pd.to_numeric, errors="coerce")
     if not numeric.index.equals(mask.index) or not numeric.columns.equals(mask.columns):
         raise ValueError("Values and censoring mask must align exactly.")
@@ -62,6 +79,11 @@ def impute_mnar_halfmin(values: pd.DataFrame, mask: pd.DataFrame) -> tuple[pd.Da
 
 
 def _rf_impute(values: pd.DataFrame, fill: pd.DataFrame, *, random_state: int) -> pd.DataFrame:
+    """Fill the cells marked in ``fill`` with a random-forest IterativeImputer; other cells are kept.
+
+    Samples are the rows the imputer learns from, so each feature is predicted
+    from its 10 most correlated features.  Features with no value at all are left missing.
+    """
     available = values.notna().any(axis=1)
     fill = fill & available.to_numpy()[:, np.newaxis]
     if not fill.to_numpy().any():
@@ -77,6 +99,7 @@ def _rf_impute(values: pd.DataFrame, fill: pd.DataFrame, *, random_state: int) -
         initial_strategy="median",
         skip_complete=True,
     )
+    # The imputer works on samples x features; transpose in and out.
     with warnings.catch_warnings():
         # max_iter=1 is deliberate (one pass, small forest); silence the "not converged" notice.
         warnings.simplefilter("ignore", ConvergenceWarning)

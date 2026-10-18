@@ -1,5 +1,16 @@
 """ASCA+ decomposition for the repeated region and treatment design.
 
+ASCA (ANOVA-simultaneous component analysis) fits one linear model to *all*
+features at once: the samples x features matrix X is split into one matrix per
+design term (Region, Group, Sex, their interactions, Mouse) plus a residual,
+
+    X_centred = X_Region + X_Group + X_Sex + ... + X_Mouse + E.
+
+The share of the total sum of squares in each term says how much of the data
+that term explains; a PCA of each effect matrix shows which features carry it.
+"ASCA+" means the effect matrices come from a proper regression (so they stay
+correct when the design is unbalanced, e.g. after removing a sample).
+
 The design uses sum-to-zero effect coding for Region, Group, Sex, and their
 interactions.  Mouse is nested within Group x Sex and is represented by
 within-cell mouse contrasts.  This is the fixed-effect analogue of the
@@ -57,15 +68,22 @@ class AscaFit:
 
     @property
     def model_rank(self) -> int:
+        """Number of independent design columns (intercept included)."""
         return int(np.linalg.matrix_rank(self.design))
 
     @property
     def total_ssq(self) -> float:
+        """Total sum of squares of the centred data: the denominator of every variance share."""
         return float(np.square(self.centered_data).sum())
 
 
 def _effect_code(labels: pd.Series, levels: tuple[str, ...]) -> np.ndarray:
-    """Return Patsy-style sum coding with the last level as reference."""
+    """Return Patsy-style sum coding with the last level as reference.
+
+    One column per level except the last; a sample of level i gets +1 in column
+    i, a sample of the last level gets -1 in every column.  Columns sum to zero
+    in a balanced design, so effects are deviations from the grand mean.
+    """
     values = labels.astype(str).to_numpy()
     if set(values) != set(levels):
         missing = sorted(set(levels).difference(values), key=str)
@@ -79,6 +97,7 @@ def _effect_code(labels: pd.Series, levels: tuple[str, ...]) -> np.ndarray:
 
 
 def _validate_metadata(metadata: pd.DataFrame) -> pd.DataFrame:
+    """Required columns present and complete, and every mouse in one group and sex."""
     required = {"Sample type", "Bio group", "Sex", "Mouse number"}
     missing = required.difference(metadata.columns)
     if missing:
@@ -95,7 +114,12 @@ def _validate_metadata(metadata: pd.DataFrame) -> pd.DataFrame:
 
 
 def _nested_mouse_code(metadata: pd.DataFrame) -> np.ndarray:
-    """Encode Mouse within each observed Group x Sex cell."""
+    """Encode Mouse within each observed Group x Sex cell.
+
+    Within a cell of m mice, m - 1 sum-coded columns (the last mouse is the
+    reference).  Mouse therefore absorbs the differences between mice *of the
+    same group and sex*, which is what the Group effect must be tested against.
+    """
     rows: list[np.ndarray] = []
     for (group, sex), cell in metadata.groupby(
         ["Bio group", "Sex"], sort=True, observed=True
@@ -121,7 +145,12 @@ def build_effect_coded_design(
     *,
     allow_rank_deficient: bool = False,
 ) -> tuple[np.ndarray, dict[str, tuple[int, ...]]]:
-    """Build the full-rank effect-coded ASCA+ design matrix."""
+    """Build the full-rank effect-coded ASCA+ design matrix.
+
+    Returns the samples x columns design and, for every term in EFFECT_ORDER,
+    the indices of its columns (used to pull out that term's effect matrix).
+    Interaction columns are products of the main-effect columns.
+    """
     metadata = _validate_metadata(metadata)
     region = _effect_code(metadata["Sample type"], REGION_LEVELS)
     group = _effect_code(metadata["Bio group"], GROUP_LEVELS)
@@ -150,6 +179,7 @@ def build_effect_coded_design(
             ["Region:Cerebellum:Group:Sex", "Region:Cortex:Group:Sex"],
         ),
     }
+    # Stack the terms after the intercept column, remembering which columns belong to which term.
     term_columns: dict[str, tuple[int, ...]] = {}
     next_column = 1
     for term in EFFECT_ORDER:
@@ -162,6 +192,7 @@ def build_effect_coded_design(
         next_column += values.shape[1]
 
     design = np.column_stack(parts)
+    # A rank-deficient design (e.g. a group x sex cell with no samples) would make the effects ambiguous.
     if not allow_rank_deficient:
         rank = np.linalg.matrix_rank(design)
         if rank != design.shape[1]:
@@ -177,6 +208,10 @@ def _scale_sample_matrix(
     sample_by_feature: np.ndarray,
     scaling: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Centre every feature and divide by its SD (autoscaled), sqrt(SD) (pareto) or 1 (unscaled).
+
+    Returns the scaled matrix plus the means and divisors used.
+    """
     if scaling not in SCALING_MODES:
         raise ValueError(f"Unknown ASCA scaling {scaling!r}; choose from {SCALING_MODES}.")
     data = np.asarray(sample_by_feature, dtype=float)
@@ -220,13 +255,16 @@ def fit_asca_prepared(
     design, term_columns = build_effect_coded_design(
         checked_metadata, allow_rank_deficient=allow_rank_deficient
     )
+    # One least-squares fit for all features at once: B = X^+ Y (features are columns of Y).
     coefficients = np.linalg.pinv(design) @ data
     fitted = design @ coefficients
     centered_data = data - data.mean(axis=0)
+    # Effect matrix of a term = its design columns x its coefficients (samples x features).
     effects = {
         term: design[:, columns] @ coefficients[list(columns)]
         for term, columns in term_columns.items()
     }
+    # Residual = what no term explains.
     residual = centered_data - sum(effects.values(), np.zeros_like(centered_data))
     raw_residual = data - fitted
     return AscaFit(
@@ -337,6 +375,8 @@ def effect_svd(
     """Return sample scores, feature loadings, and singular values for an effect."""
     if effect not in fit.effects:
         raise KeyError(f"Unknown ASCA effect: {effect}")
+    # PCA of the effect matrix via the eigen-decomposition of its (small) samples x samples
+    # Gram matrix; the effect has at most as many components as it has design columns.
     effect_matrix = fit.effects[effect]
     gram = effect_matrix @ effect_matrix.T
     eigenvalues, left = np.linalg.eigh(gram)
@@ -350,6 +390,7 @@ def effect_svd(
     nonzero = singular_values > np.finfo(float).eps
     loadings_array[:, nonzero] /= singular_values[nonzero]
     loadings_array[:, ~nonzero] = 0.0
+    # Fix the arbitrary sign: the largest loading of each component is positive.
     for component in range(n_components):
         largest = int(np.argmax(np.abs(loadings_array[:, component])))
         if loadings_array[largest, component] < 0:

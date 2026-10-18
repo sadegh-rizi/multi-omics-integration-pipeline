@@ -1,5 +1,15 @@
 """Abundance-dependent sample-similarity diagnostics for lipid peak areas.
 
+The idea (from the R package noisyR): if a feature's measurement is mostly
+noise, two samples will not agree on it.  So sort the features by abundance,
+slide a window along them, and in each window correlate the samples with each
+other.  At low abundance the correlation is poor; as abundance rises it climbs
+to a plateau.  The abundance where it reaches the plateau is a candidate noise
+floor.  The pooled-QC (Tech-Mix) injections give the purely technical curve.
+
+Pipeline:  :func:`abundance_similarity_curve` -> :func:`candidate_thresholds`
+(several rules, reported side by side; none is applied as a filter).
+
 The functions operate on feature-by-sample matrices already transformed to
 log2 positive peak areas. They use the noisyR count-matrix ordering: each
 reference sample ranks features by its own abundance before comparison with
@@ -16,6 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
 
+# Rules for reading a noise floor off the curve (see candidate_thresholds).
 DEFAULT_THRESHOLD_RULES = (
     "pearson_gt_0_25",
     "pearson_gt_0_50",
@@ -75,6 +86,7 @@ _CURVE_COLUMNS = [
 
 
 def _validated_values(values: pd.DataFrame, *, window_size: int, step: int) -> pd.DataFrame:
+    """Numeric feature x sample table with unique IDs, >= 2 samples and a feasible window."""
     if not isinstance(values, pd.DataFrame):
         raise TypeError("values must be a pandas DataFrame.")
     if values.index.has_duplicates:
@@ -97,6 +109,7 @@ def _validated_values(values: pd.DataFrame, *, window_size: int, step: int) -> p
 
 
 def _window_starts(n_lipids: int, window_size: int, step: int) -> list[int]:
+    """Start positions of the sliding windows; the last window always ends at the last feature."""
     starts = list(range(0, n_lipids - window_size + 1, step))
     final_start = n_lipids - window_size
     if starts[-1] != final_start:
@@ -144,6 +157,8 @@ def _directed_window_correlations(
     sample_names = numeric.columns.tolist()
     rows: list[dict[str, object]] = []
 
+    # Every sample in turn is the "reference": it orders the features by its own abundance,
+    # and within each window it is correlated with every other sample (the "comparators").
     for reference_position, sample_i in enumerate(sample_names):
         reference_values = matrix[:, reference_position]
         observed_positions = np.flatnonzero(np.isfinite(reference_values))
@@ -157,7 +172,7 @@ def _directed_window_correlations(
             stop = start + window_size
             window_positions = descending_order[start:stop]
             reference_window = reference_values[window_positions]
-            window_index = len(starts) - descending_index - 1
+            window_index = len(starts) - descending_index - 1      # 0 = least abundant window
             for comparator_position, sample_j in enumerate(sample_names):
                 if reference_position == comparator_position:
                     continue
@@ -198,7 +213,11 @@ def pairwise_window_correlation(
     method: str,
     min_pairwise_observations: int = 2,
 ) -> pd.DataFrame:
-    """Calculate directed reference-comparator correlations in noisyR windows."""
+    """Calculate directed reference-comparator correlations in noisyR windows.
+
+    The raw correlations behind the curve, for one method (used by the tests;
+    the pipeline uses :func:`abundance_similarity_curve`).
+    """
     if method not in {"pearson", "spearman"}:
         raise ValueError("method must be 'pearson' or 'spearman'.")
 
@@ -250,6 +269,7 @@ def abundance_similarity_curve(
         min_pairwise_observations=min_pairwise_observations,
     )
 
+    # Step 1: per reference sample and window, average its correlations with the comparators.
     reference_rows: list[dict[str, object]] = []
     for (sample_i, window_index), window_rows in paired.groupby(["sample_i", "window_index"], sort=True):
         pearson_rows = window_rows.dropna(subset=["pearson"])
@@ -270,6 +290,7 @@ def abundance_similarity_curve(
     if not reference_rows:
         return pd.DataFrame(columns=_CURVE_COLUMNS)
 
+    # Step 2: per window, the median (and IQR) over reference samples = one point of the curve.
     reference_curve = pd.DataFrame(reference_rows)
     rows: list[dict[str, object]] = []
     for window_index, window_rows in reference_curve.groupby("window_index", sort=True):
@@ -308,7 +329,19 @@ def candidate_thresholds(
     convergence_tolerance: float = 0.05,
     sustained_windows: int = 5,
 ) -> pd.DataFrame:
-    """Report candidate abundance floors without selecting one for filtering."""
+    """Report candidate abundance floors without selecting one for filtering.
+
+    Rules (the threshold is the first window, from low abundance up, that meets it):
+
+    * ``pearson_gt_0_25`` / ``pearson_gt_0_50`` - median Pearson r above 0.25 / 0.50;
+    * ``pearson_sustained_gt_0_25`` - r above 0.25 for ``sustained_windows`` windows in a row;
+    * ``pearson_90pct_plateau`` - r reaches 90 % of the plateau (median of the top 20 % of windows);
+    * ``bio_tech_gap_le_0_05`` - the biological curve comes within 0.05 of the Tech-Mix
+      curve at the same abundance.
+
+    For each found threshold it also counts later windows that fail the rule
+    again (a floor is only convincing if the curve stays above it).
+    """
     required = {"window_index", "median_log2_abundance", "median_pearson", "median_spearman"}
     if missing := required.difference(curve.columns):
         raise KeyError(f"curve is missing columns: {sorted(missing)}")
@@ -333,6 +366,7 @@ def candidate_thresholds(
             subset=["window_index", "median_log2_abundance", "median_pearson"]
         ).sort_values("window_index")
 
+    # Plateau = median correlation of the most abundant 20 % of windows.
     plateau = np.nan
     if not biological.empty:
         n_plateau_windows = max(1, ceil(len(biological) * plateau_fraction))
@@ -360,6 +394,7 @@ def candidate_thresholds(
         elif rule == "pearson_sustained_gt_0_25":
             rule_target = 0.25
             comparison_points = biological
+            # Walk up the curve counting consecutive windows above the target.
             run_length = 0
             for position in range(len(comparison_points)):
                 window_is_consecutive = (
@@ -380,6 +415,8 @@ def candidate_thresholds(
             comparison_points = biological
             candidates = comparison_points.loc[comparison_points["median_pearson"].ge(rule_target)]
         else:
+            # bio_tech_gap_le_0_05: compare with the Tech-Mix curve interpolated at the
+            # biological window's abundance (only inside the abundance range both cover).
             rule_target = convergence_tolerance
             if technical is None:
                 status = "technical_curve_missing"
@@ -456,6 +493,7 @@ def candidate_thresholds(
             "status": status,
         }
         if status == "found":
+            # Threshold = first qualifying window; then count later windows that fail the rule.
             point = candidates.iloc[0]
             window_index = point["window_index"]
             if rule == "bio_tech_gap_le_0_05":
@@ -497,12 +535,18 @@ def compare_noise_criteria(
     blank_flags: pd.Series,
     cv_flags: pd.Series,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return a complete 2x2x2 contingency table and pairwise Jaccards."""
+    """Return a complete 2x2x2 contingency table and pairwise Jaccards.
+
+    Do the three noise criteria (below the abundance floor, blank-dominated,
+    high Tech-Mix CV) flag the same features?  Used by the tests; the stage
+    reports the same overlap in ``overlap_with_blank_and_cv_filters.csv``.
+    """
     flags = {
         "abundance_below_floor": abundance_flags,
         "blank_dominated": blank_flags,
         "qc_cv_above_30": cv_flags,
     }
+    # All three flag series must be boolean and indexed by the same features.
     first_index: pd.Index | None = None
     for name, values in flags.items():
         if not isinstance(values, pd.Series):
@@ -516,6 +560,7 @@ def compare_noise_criteria(
         elif not values.index.equals(first_index):
             raise ValueError("All noise-criterion indexes must align exactly.")
 
+    # Count every one of the 8 flag combinations (zero counts included).
     table = pd.DataFrame({name: values.astype(bool) for name, values in flags.items()})
     criteria = list(flags)
     all_combinations = pd.MultiIndex.from_product(
@@ -529,6 +574,7 @@ def compare_noise_criteria(
         .reset_index()
     )
 
+    # Jaccard overlap of each pair of criteria: |both| / |either|.
     jaccard_rows: list[dict[str, object]] = []
     for criterion_a, criterion_b in combinations(criteria, 2):
         intersection = int((table[criterion_a] & table[criterion_b]).sum())

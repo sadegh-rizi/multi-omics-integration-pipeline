@@ -64,6 +64,7 @@ def write_csv(table: pd.DataFrame, path: Path, **kwargs) -> Path:
 
 
 def write_json(data: dict, path: Path) -> Path:
+    """Write a dict as indented JSON (non-JSON values via str), creating the folder first."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")

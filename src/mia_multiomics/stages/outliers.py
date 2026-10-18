@@ -69,6 +69,7 @@ def run_screen(settings: Settings, omics: str = "lipidomics") -> pd.DataFrame:
 
 
 def _screen_figures(values: pd.DataFrame, table: pd.DataFrame, meta: pd.DataFrame, region: str, out) -> None:
+    """T² and DModX index plots, and the PC1/PC2 plot with 2-D Hotelling ellipses, for one region."""
     labels = table.set_index("Sample")["Sample number"]
     t2 = table.set_index("Sample")
     fig = plotting.index_plot(t2["hotelling_t2"], labels,
@@ -104,17 +105,21 @@ def _two_stage(values: pd.DataFrame, observed: pd.DataFrame,
     ``calibrate(calibration_rows)`` returns (limits per parameter, null scores per parameter).
     """
     rows = []
+    # Stage 1: limits from all samples.
     limits1, nulls1 = calibrate(values)
+    # Parameter settings that flag the same samples share one stage-2 calibration.
     masks: dict[tuple, list] = {}
     for parameter in observed:
         flags = observed[parameter].gt(limits1.loc[parameter, "limit_95"])
         masks.setdefault(tuple(flags), []).append(parameter)
+    # Stage 2: recalibrate without the samples flagged in stage 1 (if enough samples remain).
     limits2, nulls2 = {}, {}
     for mask, parameters in masks.items():
         kept = values.loc[~np.array(mask)]
         limits, nulls = calibrate(kept) if len(kept) > values.shape[1] + 1 or len(kept) >= 3 else (limits1, nulls1)
         for parameter in parameters:
             limits2[parameter], nulls2[parameter] = limits.loc[parameter], nulls[parameter]
+    # One long table: every sample x setting x stage, with its score, null percentile and flags.
     for stage, limits, nulls in (("contaminated", limits1, nulls1), ("trimmed", pd.DataFrame(limits2).T, nulls2)):
         for parameter in observed:
             score = observed[parameter]
@@ -133,6 +138,7 @@ def _two_stage(values: pd.DataFrame, observed: pd.DataFrame,
 def _generic_calibrator(values: pd.DataFrame, scorers: dict, n: int, seed: int):
     """Simulation calibration for detectors without a batched calibrator (kernel PCA)."""
     def calibrate(rows: pd.DataFrame):
+        """Limits and null scores for every parameter, with covariance from ``rows``."""
         limits, nulls = {}, {}
         for parameter, scorer in scorers.items():
             limit, null = calibration.simulate_null_limits(values, scorer, calibration_values=rows,
@@ -153,6 +159,7 @@ def _detector_settings(scope: str, raw: pd.DataFrame, pcs: dict, settings: Setti
     tables = []
 
     def add(table: pd.DataFrame, detector: str, representation: str, parameter_name: str, counts: bool | Callable) -> None:
+        """Label one detector's long table; ``counts`` says which settings enter the stability rule."""
         table["detector"], table["representation"], table["parameter_name"], table["scope"] = detector, representation, parameter_name, scope
         table["counts_for_stability"] = table["parameter_value"].map(counts) if callable(counts) else counts
         tables.append(table)
@@ -177,6 +184,7 @@ def _detector_settings(scope: str, raw: pd.DataFrame, pcs: dict, settings: Setti
         # isolation forest averaged over seeds
         observed = detectors.isolation_forest_seed_scores(scores, seeds=if_seeds, n_estimators=settings.n_isolation_forest_trees).mean(axis=1).to_frame(len(if_seeds))
         def if_calibrate(rows, scores=scores):
+            """Isolation-forest calibration in the (limits, nulls) shape that _two_stage expects."""
             limit, null, rate = calibration.calibrate_isolation_forest(
                 scores, seeds=if_seeds, calibration_values=rows, n_estimators=settings.n_isolation_forest_trees,
                 n_replicates=max(5, n // 4), random_state=seed)
@@ -250,6 +258,7 @@ def run_ensemble(settings: Settings, omics: str = "lipidomics") -> pd.DataFrame:
 
 
 def _ensemble_figures(scores: pd.DataFrame, stable: pd.DataFrame, meta: pd.DataFrame, out) -> None:
+    """Stability heatmaps, parameter sweeps and the false-positive-rate check."""
     labels = meta.set_index("Sample")["Sample number"]
     # 1. stability heatmap: share of settings flagging each sample, per detector (trimmed stage)
     for scope, block in stable.loc[stable["calibration_stage"].eq("trimmed")].groupby("scope"):

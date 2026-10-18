@@ -1,4 +1,9 @@
-"""Small adapter for the external noisyR cross-check script."""
+"""Small adapter for the external noisyR cross-check script (optional, needs R + noisyR).
+
+Writes the matrix to CSV, runs ``r/noisyr_crosscheck.R`` with Rscript, and
+reads back noisyR's similarity curve and thresholds, so that the Python
+implementation in :mod:`.noise_floor` can be compared with the original package.
+"""
 
 from __future__ import annotations
 
@@ -75,11 +80,13 @@ def run_noisyr(
     if (window is None) != (step is None):
         raise ValueError("window and step must be supplied together.")
 
+    # 1. Input and output files for this run.
     tag = label if window is None else f"{label}_window{window}_step{step}"
     input_path = work_dir / f"noisyr_input_{tag}.csv"
     curve_path = work_dir / f"noisyr_curve_{tag}.csv"
     threshold_path = work_dir / f"noisyr_thresholds_{tag}.csv"
     values.to_csv(input_path, index_label="Feature")
+    # 2. Run the R script; window and step are optional extra arguments.
     command = [
         executable,
         str(project_root / "r" / "noisyr_crosscheck.R"),
@@ -96,6 +103,7 @@ def run_noisyr(
         stderr=subprocess.STDOUT,
         check=False,
     )
+    # 3. On failure, return noisyR's most informative error line as the status.
     if completed.returncode:
         lines = completed.stdout.strip().splitlines()
         return None, None, next(
@@ -107,6 +115,7 @@ def run_noisyr(
             lines[-1] if lines else "noisyr_failed_without_output",
         )
 
+    # 4. Read the results; a curve or threshold without any finite value is reported as such.
     curve = pd.read_csv(curve_path)
     thresholds = pd.read_csv(threshold_path)
     if not np.isfinite(curve["median_pearson"]).any():

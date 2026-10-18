@@ -1,4 +1,12 @@
-"""P-value calibration and residual diagnostics for differential results."""
+"""Checks of the differential model's assumptions and of what drives its results.
+
+* :func:`summarize_p_values` - observed vs expected numbers of small p-values;
+* :func:`residual_diagnostics` - residual normality and equal variances on a sample of features;
+* :func:`sample_influence_summary` - how much each sample changes the standard errors when
+  left out (the mechanism behind "hits" that appear only after removing a sample);
+* :func:`cross_check_qc_tables`, :func:`missingness_se_crosscheck` - do noisy or
+  incomplete features behave differently?
+"""
 
 from __future__ import annotations
 
@@ -8,10 +16,10 @@ import statsmodels.formula.api as smf
 from scipy.stats import levene, shapiro
 
 from .common import safe_correlation
+from .differential import _FORMULA  # the same group x sex model as the main analysis
 from .permutation import ols_t_statistics
 
 P_VALUE_THRESHOLDS = (0.05, 0.01, 0.001)
-_FORMULA = "value ~ C(BioGroup, Treatment(reference='Saline Control')) * C(Sex, Treatment(reference='Male'))"
 
 
 def summarize_p_values(
@@ -43,9 +51,8 @@ def summarize_p_values(
     return pd.DataFrame(rows)
 
 
-
-
 def _diagnostic_features(values: pd.DataFrame, count: int) -> list[object]:
+    """``count`` features at evenly spaced positions of the panel (a fixed, unselected sample)."""
     if count < 1:
         raise ValueError("count must be positive.")
     if values.empty:
@@ -98,6 +105,7 @@ def residual_diagnostics(
             if min(cell_counts) < min_per_cell:
                 rows.append(row)
                 continue
+            # Shapiro-Wilk on the residuals (normality) and Levene across the four cells (equal variances).
             model = smf.ols(_FORMULA, data=analysis.dropna(subset=["value"])).fit()
             residuals = model.resid.to_numpy(dtype=float)
             row.update({
@@ -118,9 +126,22 @@ def sample_influence_summary(
     *,
     min_per_cell: int = 3,
 ) -> pd.DataFrame:
-    """Summarize leave-one-sample-out changes in OLS standard errors."""
+    """Summarize leave-one-sample-out changes in OLS standard errors.
+
+    For every sample: refit all features without it and record how much the
+    standard errors change (+0.10 = 10 % larger without the sample, i.e. the
+    sample made the estimates *more* precise; negative = the sample inflated them).
+    """
     metadata = metadata.set_index("Sample", drop=False).loc[values.columns]
     rows: list[dict[str, object]] = []
+
+    def empty_rows(sample, region, effects, status):
+        """Placeholder rows when the model cannot be compared after removing ``sample``."""
+        return [{"Sample": sample, "Region": region, "Effect": effect, "n_features": 0,
+                 "median_relative_se_change": np.nan, "p95_relative_se_change": np.nan,
+                 "max_relative_se_change": np.nan, "fraction_se_increased": np.nan,
+                 "fraction_se_increased_10pct": np.nan, "fit_status": status} for effect in effects]
+
     for region, region_metadata in metadata.groupby("Sample type", sort=False, observed=True):
         samples = region_metadata["Sample"].tolist()
         region_values = values.loc[:, samples]
@@ -128,23 +149,13 @@ def sample_influence_summary(
         if full.empty:
             continue
         full = full.set_index(["Feature", "Effect"])
+        effects = full.index.get_level_values("Effect").unique()
         for sample in samples:
             remaining_metadata = region_metadata.loc[region_metadata["Sample"].ne(sample)].reset_index(drop=True)
             remaining_values = region_values.drop(columns=sample)
             leave_one_out = ols_t_statistics(remaining_values, remaining_metadata, min_per_cell=min_per_cell)
             if leave_one_out.empty:
-                rows.extend({
-                    "Sample": sample,
-                    "Region": region,
-                    "Effect": effect,
-                    "n_features": 0,
-                    "median_relative_se_change": np.nan,
-                    "p95_relative_se_change": np.nan,
-                    "max_relative_se_change": np.nan,
-                    "fraction_se_increased": np.nan,
-                    "fraction_se_increased_10pct": np.nan,
-                    "fit_status": "not_estimable_after_sample_removal",
-                } for effect in full.index.get_level_values("Effect").unique())
+                rows.extend(empty_rows(sample, region, effects, "not_estimable_after_sample_removal"))
                 continue
             leave_one_out = leave_one_out.set_index(["Feature", "Effect"])
             comparable = full[["standard_error"]].join(
@@ -153,19 +164,9 @@ def sample_influence_summary(
             )
             comparable = comparable.loc[comparable["standard_error"].gt(0)]
             if comparable.empty:
-                rows.extend({
-                    "Sample": sample,
-                    "Region": region,
-                    "Effect": effect,
-                    "n_features": 0,
-                    "median_relative_se_change": np.nan,
-                    "p95_relative_se_change": np.nan,
-                    "max_relative_se_change": np.nan,
-                    "fraction_se_increased": np.nan,
-                    "fraction_se_increased_10pct": np.nan,
-                    "fit_status": "not_comparable_after_sample_removal",
-                } for effect in full.index.get_level_values("Effect").unique())
+                rows.extend(empty_rows(sample, region, effects, "not_comparable_after_sample_removal"))
                 continue
+            # Relative change of every feature's SE without this sample, summarised per effect.
             relative_change = comparable["loo_standard_error"].div(comparable["standard_error"]).sub(1)
             for effect in relative_change.index.get_level_values("Effect").unique():
                 current = relative_change.xs(effect, level="Effect")
@@ -217,6 +218,8 @@ def missingness_se_crosscheck(
             "value": np.nan,
             "note": "Required differential QC/effect columns were unavailable.",
         }])
+    # Join per-feature SEs with the number of missing / detection-masked values, then
+    # correlate them per region and effect (do incomplete features get wider SEs?).
     qc = feature_qc.loc[:, ["Feature", "Region", "n_missing_after_preprocessing"]].copy()
     effect_table = effects.loc[:, ["Feature", "Region", "Effect", "standard_error"]].copy()
     qc["Feature_key"] = qc["Feature"].astype(str)

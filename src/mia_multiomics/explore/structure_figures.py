@@ -138,6 +138,7 @@ def module_stability(view: View, region: str = "Cortex") -> plt.Figure:
 
 # ---------------------------------------------------------------- litters
 def pca_by_cage(view: View, region: str = "Cortex") -> plt.Figure:
+    """Regional PC1/PC2 scores coloured by cage (litter)."""
     model, scores, _ = view.pca(region)
     fig = plotting.scores_plot(scores, view.metadata, config.CAGE_COL, variance=model.explained_variance_ratio_,
                                title=f"{resolve_scope(region)}: PCA by cage (litter)", ellipses=False)

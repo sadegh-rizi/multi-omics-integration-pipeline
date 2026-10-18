@@ -95,6 +95,7 @@ def _associations(scores: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
 
 
 def _treatment_tests(scores: pd.DataFrame, metadata: pd.DataFrame, settings: Settings, prefix: str) -> pd.DataFrame:
+    """Litter-aware MIA test (Welch, mouse permutation, exact cage permutation) of every score column."""
     return pd.DataFrame([treatment_score_test(metadata, scores[c].reset_index(drop=True), score_name=f"{prefix}:{c}",
                                               n_mouse_permutations=settings.n_mouse_permutations) for c in scores])
 
@@ -105,6 +106,7 @@ def run_mofa(settings: Settings) -> pd.DataFrame:
     plotting.apply_plot_style()
     out = settings.out("integration", "01_mofa")
     blocks, metadata, _ = build_blocks(settings, write=False)
+    # 1. Fit MOFA+ with several random seeds; keep the factors that recur in >= 80 % of them.
     fits = [fit_mofa(blocks, metadata, seed=settings.seed + s, n_factors=settings.mofa_factors,
                      iterations=settings.mofa_iterations) for s in range(settings.mofa_seeds)]
     stability, aligned = seed_stability(fits, by="scores")
@@ -113,6 +115,7 @@ def run_mofa(settings: Settings) -> pd.DataFrame:
     names = [f"Factor{k + 1}" for k in range(reference.factors.shape[1])]
     scores = pd.DataFrame(reference.factors, index=reference.samples, columns=names).loc[metadata["Sample"]]
 
+    # 2. Variance explained per omics and factor; a factor "active" in >= 2 omics is shared.
     variance = pd.DataFrame(reference.variance[0], index=reference.views, columns=names)
     variance_long = variance.rename_axis("View").reset_index().melt(id_vars="View", var_name="Factor", value_name="variance_explained")
     variance_long["active_in_view"] = variance_long["variance_explained"].ge(0.02)
@@ -120,6 +123,8 @@ def run_mofa(settings: Settings) -> pd.DataFrame:
     write_csv(stability, out / "factor_stability.csv")
     write_csv(variance_long, out / "variance_explained.csv")
     write_csv(scores.rename_axis("Sample").reset_index(), out / "factor_scores.csv")
+    # 3. What each factor tracks (R² with region, group, sex, cage, ...), its top features,
+    #    and litter-aware tests of the stable factors against MIA.
     associations = _associations(scores, metadata.reset_index(drop=True).set_index(scores.index))
     write_csv(associations, out / "factor_associations.csv")
     median_weights = [np.nanmedian(np.stack([w[v] for w in aligned]), axis=0) for v in range(len(blocks))]
@@ -149,6 +154,7 @@ def run_mofa(settings: Settings) -> pd.DataFrame:
 
 
 def _mofa_figures(variance: pd.DataFrame, scores: pd.DataFrame, metadata: pd.DataFrame, stable: list[int], out) -> None:
+    """Heatmap of % variance per omics and factor, and the Factor 1 vs Factor 2 score plot."""
     shown = variance.loc[:, variance.max(axis=0) >= 0.01]
     fig, ax = plt.subplots(figsize=(max(4, 0.7 * shown.shape[1] + 2), 2.8))
     image = ax.imshow(shown * 100, cmap="Blues", aspect="auto")
@@ -172,6 +178,8 @@ def run_mofa_within_region(settings: Settings) -> pd.DataFrame:
     out = settings.out("integration", "02_mofa_within_region")
     blocks, metadata, _ = build_blocks(settings, write=False)
     fit_kwargs = dict(n_factors=settings.mofa_factors, iterations=settings.mofa_iterations, ard_factors=True)
+    # Multi-group MOFA+: one group per region, each centred, so region differences are removed.
+    # Sample order differs between groups, so factors are matched across seeds by their loadings.
     fits = [fit_mofa(blocks, metadata, seed=settings.seed + s, groups=config.REGIONS, **fit_kwargs)
             for s in range(settings.mofa_seeds)]
     stability, _ = seed_stability(fits, by="loadings", threshold=0.8)
@@ -226,6 +234,7 @@ def run_mofa_within_region(settings: Settings) -> pd.DataFrame:
 
 
 def _within_region_figure(variance: pd.DataFrame, out) -> None:
+    """Heatmap of % variance explained by the stable factors, per region and omics."""
     stable = variance.loc[variance["stable"]]
     if stable.empty:
         return
@@ -267,6 +276,7 @@ def _block_pls(train: dict, test: dict, labels: pd.Series) -> tuple[np.ndarray, 
 
 
 def _nearest_centroid(train: np.ndarray, labels: pd.Series, test: np.ndarray, truth: pd.Series) -> float:
+    """Accuracy of assigning each test sample to the nearest training-class centroid."""
     classes = list(pd.unique(labels))
     centroids = np.vstack([train[labels.to_numpy() == c].mean(0) for c in classes])
     predicted = [classes[int(np.argmin(((row - centroids) ** 2).sum(1)))] for row in test]
@@ -278,6 +288,8 @@ def run_benchmark(settings: Settings) -> pd.DataFrame:
     out = settings.out("integration", "03_benchmark")
     blocks, metadata, _ = build_blocks(settings, write=False)
     concatenated = pd.concat([b.add_prefix(f"{v}:") for v, b in blocks.items()], axis=1)
+    # Positive control: can region be predicted for mice never seen in training?
+    # Folds hold out whole mice (all three regions), so a mouse never helps predict itself.
     rows = []
     folds = mouse_grouped_folds(metadata, random_state=settings.seed)
     for method in ("concatenated_pca", "block_pls"):
@@ -301,11 +313,15 @@ def run_benchmark(settings: Settings) -> pd.DataFrame:
         cages = metadata.loc[mask, config.CAGE_COL].to_numpy()
         region_blocks = {v: b.loc[mask].reset_index(drop=True) for v, b in blocks.items()}
         cv = [(np.flatnonzero(cages != c), np.flatnonzero(cages == c)) for c in pd.unique(cages)]
+        # Per omics and fold: PCA fitted on the training litters, test litter projected onto it.
         reps = {v: [_pca_fold(b.iloc[tr], b.iloc[te]) for tr, te in cv] for v, b in region_blocks.items()}
         for target in config.VIEWS:
-            null_reps = [[_pca_fold(region_blocks[target].iloc[rng.permutation(mask.sum())].reset_index(drop=True).iloc[tr],
-                                    region_blocks[target].iloc[rng.permutation(mask.sum())].reset_index(drop=True).iloc[te]) for tr, te in cv]
-                         for _ in range(max(3, settings.n_cross_omics_shuffles // 3))]
+            # Null: shuffle which mouse the target omics belongs to (one shuffle per replicate,
+            # then the same folds), which breaks any real cross-omics link.
+            null_reps = []
+            for _ in range(max(3, settings.n_cross_omics_shuffles // 3)):
+                shuffled = region_blocks[target].iloc[rng.permutation(mask.sum())].reset_index(drop=True)
+                null_reps.append([_pca_fold(shuffled.iloc[tr], shuffled.iloc[te]) for tr, te in cv])
             for source in config.VIEWS:
                 if source == target:
                     continue
@@ -315,6 +331,7 @@ def run_benchmark(settings: Settings) -> pd.DataFrame:
                                 "null_mean": null.mean(), "pairing_shuffle_p": (1 + np.sum(null >= observed)) / (1 + len(null))})
     write_csv(pd.DataFrame(predict), out / "within_region_predictability.csv")
 
+    # Negative control: the first component of all omics together should not track MIA.
     pc1, _ = _pca_fold(concatenated, concatenated, n=2)
     scores = pd.DataFrame(pc1, columns=["Component1", "Component2"])
     write_csv(pd.DataFrame([treatment_score_test(metadata, scores["Component1"], score_name="concatenated PCA: Component1",
@@ -323,6 +340,7 @@ def run_benchmark(settings: Settings) -> pd.DataFrame:
 
 
 def _oof_r2(source: list, target: list) -> float:
+    """Out-of-fold R² of predicting the target omics' PCs from the source omics' PCs (ridge regression)."""
     predicted, actual = [], []
     for (s_train, s_test), (t_train, t_test) in zip(source, target):
         predicted.append(Ridge(alpha=1.0).fit(s_train, t_train).predict(s_test))
@@ -344,8 +362,11 @@ def _modules(correlation: np.ndarray, rows: list[str], columns: list[str]) -> li
     if len(r) < 2 or len(c) < 2:
         return []
     def cluster(profiles: np.ndarray) -> np.ndarray:
+        """Average-linkage clusters of association profiles (correlation distance)."""
         distances = np.nan_to_num(pdist(profiles, metric="correlation"), nan=1.0)
         return fcluster(linkage(distances, method="average"), t=MODULE_DISTANCE, criterion="distance")
+    # Cluster rows and columns separately; every row-cluster x column-cluster block with
+    # at least two strong associations is a module.
     profiles = correlation[np.ix_(r, c)]
     row_labels, column_labels = cluster(profiles), cluster(profiles.T)
     modules = []
@@ -361,6 +382,7 @@ def _modules(correlation: np.ndarray, rows: list[str], columns: list[str]) -> li
 
 
 def _jaccard(a: str, b: str) -> float:
+    """Overlap of two ';'-separated feature lists (|A and B| / |A or B|)."""
     a, b = set(a.split(";")), set(b.split(";"))
     return len(a & b) / len(a | b)
 
@@ -370,6 +392,7 @@ def run_cross_omics_screen(settings: Settings) -> pd.DataFrame:
     out = settings.out("integration", "04_cross_omics_screen")
     blocks, metadata, features = build_blocks(settings, write=False)
     annotation = features["lipidomics"].loc[blocks["lipidomics"].columns, ["Lipid Name", "Lipid Class"]]
+    # Lipids are summarised first (class shares, chain-length bins, ...) to keep the number of pairs manageable.
     lipid_summaries, definitions = build_lipid_summary_features(blocks["lipidomics"], annotation)
     write_csv(definitions.reset_index(), out / "lipid_summary_definitions.csv")
     rng = np.random.default_rng(settings.seed)
@@ -379,6 +402,8 @@ def run_cross_omics_screen(settings: Settings) -> pd.DataFrame:
             mask = metadata[config.REGION_COL].eq(region).to_numpy()
             left = lipid_summaries.loc[mask].reset_index(drop=True)
             right = blocks[view].loc[mask].reset_index(drop=True)
+            # How many lipid-summary x target pairs have |rho| >= 0.6, compared with data whose
+            # sample pairing between the two omics has been shuffled?
             correlation = spearman_matrix(left, right)
             observed = int(np.sum(np.abs(correlation) >= THRESHOLD))
             null = np.array([np.sum(np.abs(spearman_matrix(left, right.iloc[rng.permutation(len(right))].reset_index(drop=True))) >= THRESHOLD)
@@ -386,6 +411,7 @@ def run_cross_omics_screen(settings: Settings) -> pd.DataFrame:
             counts.append({"Region": region, "target_view": view, "observed_pairs": observed, "null_mean": null.mean(),
                            "null_z": (observed - null.mean()) / null.std(ddof=1) if null.std(ddof=1) else np.nan,
                            "pairing_shuffle_p": (1 + np.sum(null >= observed)) / (1 + len(null))})
+            # Modules, and how often each reappears when whole litters are resampled.
             found = _modules(correlation, list(left.columns), list(right.columns))
             cages = metadata.loc[mask, config.CAGE_COL].to_numpy()
             for module in found:
@@ -398,6 +424,7 @@ def run_cross_omics_screen(settings: Settings) -> pd.DataFrame:
                 modules.append({"Region": region, "target_view": view, **module,
                                 "bootstrap_stability": hits / settings.n_cross_omics_bootstraps})
     modules = pd.DataFrame(modules)
+    # A candidate finding is stable under the litter bootstrap and seen in at least two regions.
     if len(modules):
         modules["stable"] = modules["bootstrap_stability"].ge(0.7)
         modules["n_regions_matched"] = [
@@ -417,8 +444,10 @@ def run_enrichment(settings: Settings) -> pd.DataFrame:
     out = settings.out("integration", "05_enrichment")
     blocks, _, features = build_blocks(settings, write=False)
     annotation = features["proteomics"].loc[blocks["proteomics"].columns]
+    # Background = all proteins in the integration block (not the whole genome).
     background = set(annotation.index)
     gene_of = {p: str(g).casefold() for p, g in annotation["Gene"].items() if pd.notna(g)}
+    # Units to test: proteins behind each within-region MOFA+ factor and each cross-omics module.
     units = []
     for fraction in ("5pct", "10pct"):
         path = settings.results_dir / "integration" / "02_mofa_within_region" / f"top_features_{fraction}.csv"
@@ -431,6 +460,7 @@ def run_enrichment(settings: Settings) -> pd.DataFrame:
         modules = pd.read_csv(modules_path)
         for _, m in modules.loc[modules["target_view"].eq("proteomics")].iterrows():
             units.append((f"{m['Region']} module {m['module']}", set(str(m["target_features"]).split(";"))))
+    # Hypergeometric over-representation of every gene set (GMT files) in every unit; BH within unit.
     rows, references = [], []
     for path in sorted((settings.data_dir / config.REFERENCE_DIR).glob("*.gmt*")):
         collection = "Reactome" if "reactome" in path.name.casefold() else "GO"

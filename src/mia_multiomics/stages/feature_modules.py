@@ -55,6 +55,7 @@ def run(settings: Settings, omics: str = "metabolomics") -> pd.DataFrame:
         complete = complete_features(prepared.values.loc[:, region_samples(prepared.metadata, region)])
         tag = region.lower()
 
+        # 1. Feature-space PCA and how stable its loadings are (bootstrap + split half).
         margin_loadings, _, margin_scree = fit_feature_margin_svd(complete)
         write_csv(margin_scree.assign(Region=region), out / f"feature_margin_scree_{tag}.csv")
         loadings, scree = fit_sample_space_loadings(complete, scale_features=True)
@@ -69,6 +70,7 @@ def run(settings: Settings, omics: str = "metabolomics") -> pd.DataFrame:
         write_csv(stability.assign(Region=region), out / f"loading_bootstrap_stability_{tag}.csv")
         write_csv(split.assign(Region=region), out / f"loading_split_half_{tag}.csv")
 
+        # 2. Co-abundance modules, their bootstrap stability, and a permuted null for module size.
         correlation = spearman_correlation(complete)
         modules = assign_hierarchical_modules(correlation, distance_cut=MODULE_DISTANCE_CUT, signed=True)
         co_membership = bootstrap_module_comembership(complete, n_bootstraps=settings.n_module_bootstraps,
@@ -83,6 +85,7 @@ def run(settings: Settings, omics: str = "metabolomics") -> pd.DataFrame:
         write_csv(modules.rename("module").rename_axis("Feature").reset_index().assign(Region=region), out / f"module_assignments_{tag}.csv")
         write_csv(null_sizes.assign(Region=region), out / f"module_null_sizes_{tag}.csv")
 
+        # 3. Is the largest real module bigger than the largest modules found in permuted data?
         largest_null = null_sizes.groupby("null_permutation")["n_features"].max()
         largest = int(modules.value_counts().max())
         summary.append({"Region": region, "n_complete_features": len(complete),
@@ -99,6 +102,7 @@ def run(settings: Settings, omics: str = "metabolomics") -> pd.DataFrame:
 
 
 def _heatmap(correlation: pd.DataFrame, modules: pd.Series, region: str, path) -> None:
+    """Correlation heatmap with features ordered by module (at most 150 features shown)."""
     order = modules.sort_values().index
     if len(order) > 150:                   # keep the figure readable: largest modules first
         big = modules.value_counts().index

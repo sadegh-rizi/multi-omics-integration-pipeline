@@ -47,6 +47,7 @@ def run(settings: Settings) -> pd.DataFrame:
     prepared = prepare(settings, "lipidomics", max_missing_fraction=None)   # the facility did not filter by prevalence
     meta = prepared.metadata.loc[~prepared.metadata["Sample"].isin(EXCLUDED_SAMPLES)]
     values = prepared.values.loc[:, meta["Sample"]]
+    # The facility picked its heatmap lipids by nominal p of the MIA effect; reproduce that choice.
     effects = fit_regionwise_differential(values, meta, annotations=prepared.features).effects
     scaled = for_multivariate(values)
     labels = feature_label(prepared.features)
@@ -69,6 +70,7 @@ def run(settings: Settings) -> pd.DataFrame:
 
 
 def _heatmap(values: pd.DataFrame, meta: pd.DataFrame, labels: pd.Series, region: str) -> plt.Figure:
+    """Facility-style heatmap: Ward-clustered rows, samples ordered by group, sex and number."""
     row_linkage = linkage(values.to_numpy(dtype=float), method="ward")
     ordered = values.iloc[leaves_list(row_linkage)].loc[:, vendor_column_order(meta)]
     ordered_meta = meta.set_index("Sample").loc[ordered.columns]
@@ -91,6 +93,7 @@ def _heatmap(values: pd.DataFrame, meta: pd.DataFrame, labels: pd.Series, region
 
 
 def _plsda(scores: pd.DataFrame, meta: pd.DataFrame, variance: np.ndarray, p_value: float) -> plt.Figure:
+    """Facility-style PLS-DA score plot with 95 % data ellipses and the permutation p in the title."""
     joined = scores.join(meta.set_index("Sample")[[config.GROUP_COL, "Sample number"]])
     fig, ax = plt.subplots(figsize=(6.8, 5.6))
     for group, color in VENDOR_COLORS.items():

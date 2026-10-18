@@ -21,6 +21,9 @@ of an MSc thesis, prepared for a scientific-programming course.
 
 ## Start here: the two notebooks
 
+For the analysis steps at a glance, with a link from each step to its code, see
+[Workflow: from raw peaks to results](#workflow-from-raw-peaks-to-results).
+
 Both notebooks are in `notebooks/` and **have already been run**, so all tables
 and figures are visible as soon as you open them. You only need to run them if
 you want to change something.
@@ -81,6 +84,38 @@ profiles, ASCA+, the facility-style figures and the lipid-protein myelin check.
 
 ---
 
+## Workflow: from raw peaks to results
+
+![Workflow of the pipeline](docs/figures/workflow.png)
+
+The numbers in the boxes are from the real study (lipidomics; metabolomics runs through the same code, 248 → 246 features). On the toy data the same steps give 301 → 288 → 282 lipids, with 161 values masked below the detection limit (metabolomics 120 → 114). Each box is implemented here:
+
+| Box | What the code does | Code | Walkthrough section |
+|---|---|---|---|
+| **Raw peaks** · 992 lipids, 60 samples | Reads the facility's Excel report (and the cage sheet and Perseus proteomics exports) into one table per omics: values, blanks, Tech-Mix injections, feature annotation, sample metadata. Nothing is changed yet. | [`inputs.py` · `load_lipidomics`](src/mia_multiomics/inputs.py#L204)<br>[`inputs.py` · `_vendor_omics`](src/mia_multiomics/inputs.py#L174)<br>[`toy_data.py` · simulated data](src/mia_multiomics/toy_data.py#L454) | [1](notebooks/walkthrough.ipynb) |
+| **Prevalence** · ≤ 20 % missing, −17 lipids | Drops features missing in more than 20 % of all 60 raw samples (counted before any sample is removed, so every population sees the same panel). | [`preprocessing.py` · step 1 in `preprocess`](src/mia_multiomics/preprocessing.py#L224)<br>[`config.py` · `MAX_MISSING_FRACTION`](src/mia_multiomics/config.py#L68) | [2](notebooks/walkthrough.ipynb) |
+| **Blank filter** · < 3× blank, −11 lipids | Drops features whose median sample signal is below 3 × the mean of the blank injections. | [`preprocessing.py` · `blank_dominated`](src/mia_multiomics/preprocessing.py#L50) | [2](notebooks/walkthrough.ipynb) |
+| **Below LOD → missing** · 394 cells | Sets single values below the detection limit, max(3 × mean blank, floor), to missing. Missing values are never imputed in the main analysis. | [`preprocessing.py` · `below_detection_reasons`](src/mia_multiomics/preprocessing.py#L58) | [2](notebooks/walkthrough.ipynb) |
+| **Normalize** · log2, sample median / PQN / Pareto | log2, then each sample's median is subtracted (or PQN against the region's median profile), per acquisition mode for metabolomics. Pareto or auto-scaling is applied later, where a method needs it. | [`preprocessing.py` · `normalize`](src/mia_multiomics/preprocessing.py#L118)<br>[`preprocessing.py` · `pqn_normalize`](src/mia_multiomics/preprocessing.py#L96)<br>[`preprocessing.py` · `scale`](src/mia_multiomics/preprocessing.py#L153) | [2](notebooks/walkthrough.ipynb) |
+| **→ 964 lipids** | The output of the whole chain for one analysis population: `prepare(settings, omics, population)` = load + `preprocess` (all 60, t2_95 or t2_99). | [`preprocessing.py` · `preprocess`](src/mia_multiomics/preprocessing.py#L191)<br>[`stages/common.py` · `prepare`](src/mia_multiomics/stages/common.py#L26) | [2](notebooks/walkthrough.ipynb) |
+| **QC check** · Tech-Mix CV 23 %, drift | CV of every feature over the pooled-QC (Tech-Mix) injections, their signal drift over injection order, and technical vs biological variance. Reported, not used as filters. | [`qc.py` · `qc_injection_cv`](src/mia_multiomics/qc.py#L14)<br>[`stages/qc.py` · `_pooled_qc`](src/mia_multiomics/stages/qc.py#L55) | [3](notebooks/walkthrough.ipynb) |
+| **Outliers** · 6-detector ensemble, flag only | Regional Hotelling T² / DModX screen (defines t2_95 and t2_99), then six detector families, every parameter swept and calibrated on simulated outlier-free data in two stages. Samples are flagged, never deleted. | [`stages/outliers.py` · `run_screen`](src/mia_multiomics/stages/outliers.py#L41)<br>[`stages/outliers.py` · `run_ensemble`](src/mia_multiomics/stages/outliers.py#L211)<br>[`stages/outliers.py` · `_two_stage`](src/mia_multiomics/stages/outliers.py#L98)<br>[`outliers/calibration.py` · `calibrate_knn_sweep`](src/mia_multiomics/outliers/calibration.py#L127) | [4](notebooks/walkthrough.ipynb) |
+| **Per-region model** · group × sex, BH-FDR | `log2 value ~ group * sex` per feature within each region (OLS), Benjamini-Hochberg over the panel, with a permutation null, effective number of tests and detectable effect sizes. | [`stats/differential.py` · `fit_regionwise_differential`](src/mia_multiomics/stats/differential.py#L48)<br>[`stages/differential.py` · `run`](src/mia_multiomics/stages/differential.py#L49)<br>[`stats/permutation.py` · `run_permutation_null`](src/mia_multiomics/stats/permutation.py#L444)<br>[`stats/common.py` · `bh_adjust`](src/mia_multiomics/stats/common.py#L9) | [5](notebooks/walkthrough.ipynb) |
+| **Multivariate** · PCA, PERMANOVA, ASCA+, region persistence | PCA per region and pooled; PERMANOVA with Freedman-Lane permutations; ASCA+ with permutation tests at the right unit (region within mouse, whole litters for MIA); region-difference profiles in MIA vs control, corrected for noise. | [`multivariate/pca.py` · `fit_pca`](src/mia_multiomics/multivariate/pca.py#L27)<br>[`stats/permanova.py` · `permanova_by_region`](src/mia_multiomics/stats/permanova.py#L56)<br>[`multivariate/asca.py` · `fit_asca`](src/mia_multiomics/multivariate/asca.py#L295)<br>[`stages/asca.py` · `permutation_tests`](src/mia_multiomics/stages/asca.py#L153)<br>[`stats/region_contrast.py` · `disattenuated_concordance`](src/mia_multiomics/stats/region_contrast.py#L557) | [3, 7, 8](notebooks/walkthrough.ipynb) |
+| **Integration** · MOFA+ | MOFA+ on all samples and multi-group within region, several random seeds, factors kept only if they recur; litter-aware tests against MIA. | [`integration/mofa.py` · `fit_mofa`](src/mia_multiomics/integration/mofa.py#L33)<br>[`stages/integration.py` · `run_mofa`](src/mia_multiomics/stages/integration.py#L104)<br>[`stages/integration.py` · `run_mofa_within_region`](src/mia_multiomics/stages/integration.py#L176) | [10](notebooks/walkthrough.ipynb) |
+| **No imputation / RF imputation** | Main analysis: no imputation. Sensitivity: half-min for left-censored values plus random-forest imputation of missing-at-random cells (or of every cell, as the naive contrast), label-free and per region. | [`imputation.py` · `impute_rf_mar_only`](src/mia_multiomics/imputation.py#L112)<br>[`stages/sensitivity.py` · `rf_variants`](src/mia_multiomics/stages/sensitivity.py#L141) | [6](notebooks/walkthrough.ipynb) |
+| **Sensitivity grid** | Specification curve (prevalence × CV filter × imputation), RF / scaling grid, median vs PQN, and litter-aware models. Any other single combination can be recomputed in the supplementary notebook. | [`stages/sensitivity.py` · `specification_curve`](src/mia_multiomics/stages/sensitivity.py#L50)<br>[`stages/sensitivity.py` · `cage_structure`](src/mia_multiomics/stages/sensitivity.py#L242)<br>[`explore/view.py` · `build_view` (any combination)](src/mia_multiomics/explore/view.py#L225) | [6](notebooks/walkthrough.ipynb) |
+
+Three boxes differ slightly from this repository:
+
+* **Drift.** Tech-Mix signal drift is measured and plotted (`stages/qc.py`, `techmix_drift.png`); the code does not apply a drift correction.
+* **504-variant sensitivity grid.** That grid (4 prevalence × 3 blank × 3 CV filters × 2 normalisations × 7 outlier rules) was built for the interactive explorer app of the thesis repository, which is not part of this copy. Here the sensitivity stage runs the 16-specification curve, the RF/scaling grid, PQN and the litter-aware models, and the supplementary notebook recomputes any single combination.
+* **Integration.** MOFA+ here integrates all three omics (lipidomics, metabolomics and proteomics).
+
+(Line links point to this version of the code.)
+
+---
+
 ## Setup
 
 Python 3.10 or newer.
@@ -124,7 +159,7 @@ multi-omics-integration-pipeline/
 ├── results/                   created when you run anything: every table and figure (git-ignored)
 ├── tests/                     pytest suite: library functions + end-to-end runs on the toy data
 ├── r/                         optional R cross-checks (limma, noisyR, DIABLO, MFA, ASCA); see r/README.md
-├── docs/refactoring_notes.md  how the code maps to the original thesis repository, bugs found
+├── docs/                  refactoring_notes.md (how the code maps to the thesis repository), figures/workflow.png
 ├── pyproject.toml             package definition (pip install -e .)
 └── requirements.txt           dependencies
 ```

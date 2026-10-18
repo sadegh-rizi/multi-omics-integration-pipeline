@@ -37,6 +37,7 @@ OMICS_WITH_BLANKS = ("lipidomics", "metabolomics")
 
 
 def _for_each(function: Callable, omics: tuple[str, ...] = OMICS_WITH_BLANKS, **kwargs) -> Callable[[Settings], None]:
+    """Turn ``function(settings, omics)`` into a step that runs it for every omics in ``omics``."""
     def run(settings: Settings) -> None:
         for name in omics:
             function(settings, name, **kwargs)
@@ -44,6 +45,7 @@ def _for_each(function: Callable, omics: tuple[str, ...] = OMICS_WITH_BLANKS, **
 
 
 def _differential_all(settings: Settings) -> None:
+    """The differential model for every omics and population, then the population comparison."""
     for omics in OMICS_WITH_BLANKS:
         for population in config.POPULATIONS:
             differential.run(settings, omics, population)
@@ -51,6 +53,7 @@ def _differential_all(settings: Settings) -> None:
 
 
 def _persistence_all(settings: Settings) -> None:
+    """Region persistence for every omics and population, then the summary figure."""
     for omics in OMICS_WITH_BLANKS:
         for population in config.POPULATIONS:
             region_persistence.run(settings, omics, population)
@@ -58,12 +61,14 @@ def _persistence_all(settings: Settings) -> None:
 
 
 def _asca_all(settings: Settings) -> None:
+    """ASCA+ for every omics and population."""
     for omics in OMICS_WITH_BLANKS:
         for population in config.POPULATIONS:
             asca.run(settings, omics, population)
 
 
 def _sensitivity_all(settings: Settings) -> None:
+    """All sensitivity analyses; the slow pooled mixed model only in full-size runs."""
     sensitivity.specification_curve(settings, "lipidomics")
     sensitivity.rf_variants(settings, "lipidomics")
     sensitivity.normalization_comparison(settings, "lipidomics")
@@ -116,6 +121,7 @@ def run_all(settings: Settings, only: list[str] | None = None, verbose: bool = T
 
 
 def main() -> None:
+    """Command-line entry point: ``python -m mia_multiomics.pipeline [--fast] [--with-r] [--only ...]``."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--fast", action="store_true", help="small resampling counts (demonstration run)")

@@ -17,6 +17,7 @@ from ..stats.common import r_squared
 
 
 def complete_numeric(values: pd.DataFrame) -> pd.DataFrame:
+    """Values as floats; raise if the matrix is empty or has any missing value (PCA needs complete data)."""
     numeric = values.apply(pd.to_numeric, errors="coerce")
     if numeric.empty or numeric.isna().to_numpy().any():
         raise ValueError("PCA requires a non-empty complete feature-by-sample matrix.")
@@ -181,8 +182,15 @@ def loading_concentration(loadings: pd.DataFrame, n_features: tuple[int, ...] = 
     return pd.DataFrame(rows)
 
 
-def class_composition(loadings: pd.DataFrame, classes: pd.Series, n_largest: int = 6) -> pd.DataFrame:
-    """Summarise each component's squared-loading share by lipid class."""
+def class_composition(loadings: pd.DataFrame, classes: pd.Series, n_largest: int = 6,
+                      annotation_name: str = "Class") -> pd.DataFrame:
+    """Summarise each component's squared-loading share by lipid class (or any feature annotation).
+
+    A component's squared loadings sum to 1, so the share of a class is how much
+    of the component that class carries.  Comparing it with the class's share of
+    the panel (``enrichment_vs_panel``) shows over-represented classes.  The
+    ``n_largest`` classes are kept, the rest pooled as "Other".
+    """
     if n_largest < 1:
         raise ValueError("n_largest must be positive.")
     classes = classes.reindex(loadings.index).fillna("Unannotated").astype(str)
@@ -198,7 +206,7 @@ def class_composition(loadings: pd.DataFrame, classes: pd.Series, n_largest: int
         for lipid_class, share in kept.items():
             rows.append({
                 "Component": component,
-                "Class": lipid_class,
+                annotation_name: lipid_class,
                 "squared_loading_share": share,
                 "panel_feature_share": panel_share.get(lipid_class, np.nan),
                 "enrichment_vs_panel": share / panel_share[lipid_class] if lipid_class in panel_share else np.nan,
@@ -251,6 +259,8 @@ def pooled_region_group_composite(
     """
     joined = metadata.set_index("Sample").loc[scores.index].copy()
     joined["Date collected"] = pd.to_datetime(joined["Date collected"]).dt.strftime("%Y-%m-%d")
+    # Layout: top row = PC1/PC2 and PC3/PC4 coloured by region and treatment; below them the
+    # same planes coloured by cage and by collection date; right column = R² heatmap.
     figure = plt.figure(figsize=(17, 11))
     grid = figure.add_gridspec(2, 3, width_ratios=[1, 1, 1.25], height_ratios=[1, 1.8])
     lower = grid[1, :2].subgridspec(2, 2, hspace=0.48)
@@ -282,6 +292,7 @@ def pooled_region_group_composite(
             current.set_xlabel(f"{x} ({variance[int(x.split()[1]) - 1] * 100:.1f}%)")
             current.set_ylabel(f"{y} ({variance[int(y.split()[1]) - 1] * 100:.1f}%)")
 
+    # Marginal R² of each design factor for PC1-PC5 (from score_attribution).
     heatmap = figure.add_subplot(grid[:, 2])
     factors = ["Region", "Bio group", "Sex", "Cage", "Collection date", "Tissue mass"]
     table = attribution.pivot(index="Component", columns="Factor", values="factor_score_r2").loc[scores.columns[:5], factors]

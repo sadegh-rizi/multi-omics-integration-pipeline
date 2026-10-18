@@ -59,9 +59,11 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
     plotting.apply_plot_style()
     name = name or population
     out = settings.out(omics, "03_differential", name)
+    # 1. Data of this population (the preprocessing itself is in preprocessing.preprocess).
     prepared = prepare(settings, omics, population, normalization=normalization)
     values, meta, features = prepared.values, prepared.metadata, prepared.features
 
+    # 2. Optional sensitivity variants: imputation, a label-free variance filter, Pareto scaling.
     if imputation is not None:
         values, routes = impute_by_region(settings, omics, values, meta, imputation)
         write_csv(routes.stack().value_counts().rename_axis("route").rename("n_cells").reset_index(), out / "imputation_routes.csv")
@@ -72,6 +74,7 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
         values = pareto_scale(drop_zero_variance(values))
     effect_scale = "pareto_scaled_log2" if scaling == "pareto" else "normalized_log2"
 
+    # 3. The model: log2 value ~ group * sex per feature and region, BH-FDR over the whole panel.
     fitted = fit_regionwise_differential(values, meta, annotations=features, min_per_cell=config.MIN_PER_CELL,
                                          fdr_denominator="all_features", effect_scale=effect_scale)
     effects = fitted.effects
@@ -85,6 +88,8 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
     if light:
         return effects
 
+    # 4. Everything needed to read the hits honestly: detectable effect sizes and volcano plots,
+    #    the permutation null and diagnostics, multivariate checks, and lipid-class summaries.
     _power_and_volcanoes(effects, features, out)
     _null_and_diagnostics(settings, omics, values, meta, fitted, prepared.detection, out)
     _multivariate_checks(settings, values, meta, out)
@@ -129,6 +134,7 @@ def impute_by_region(settings: Settings, omics: str, values: pd.DataFrame, meta:
 
 # ---------------------------------------------------------------- power, volcanoes
 def _power_and_volcanoes(effects: pd.DataFrame, features: pd.DataFrame, out) -> None:
+    """Minimum detectable effects, and a volcano grid (rows = effects, columns = regions)."""
     mde, mde_summary = detectable_effect_sizes(effects, alpha=config.POWER_ALPHA, target_power=config.POWER_TARGET,
                                                illustrative_litter_n=config.ILLUSTRATIVE_LITTER_N)
     write_csv(mde, out / "detectable_effect_sizes.csv")
@@ -155,6 +161,7 @@ def _power_and_volcanoes(effects: pd.DataFrame, features: pd.DataFrame, out) -> 
 
 # ---------------------------------------------------------------- permutation null, diagnostics
 def _null_and_diagnostics(settings, omics, values, meta, fitted, detection, out) -> None:
+    """Sample-level permutation null with effective tests, then residual, influence and QC cross-checks."""
     features, null_summary, effective = run_permutation_null(
         values, meta, n_permutations=settings.n_permutations, random_state=settings.seed,
         min_per_cell=config.MIN_PER_CELL, exchangeability_unit="sample")

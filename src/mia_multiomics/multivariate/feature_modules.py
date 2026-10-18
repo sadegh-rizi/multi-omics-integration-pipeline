@@ -1,4 +1,18 @@
-"""Feature-space PCA and descriptive co-abundance module helpers."""
+"""Structure among *features* (rather than samples) within one region.
+
+Two complementary views of a complete features x samples matrix:
+
+* **feature-space PCA** - an SVD with features as observations
+  (:func:`fit_feature_margin_svd`), with bootstrap and split-half checks of
+  whether the feature loadings are stable enough to interpret;
+* **co-abundance modules** - features clustered on their signed Spearman
+  correlation (:func:`assign_hierarchical_modules`), with bootstrap
+  co-membership (:func:`bootstrap_module_comembership`) and a permuted null for
+  module size (:func:`permuted_null_module_sizes`).
+
+With 20 samples per region both are descriptive: they say whether structure
+exists, not which features drive it.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +23,12 @@ import pandas as pd
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 
-from .pca import align_loading_signs
+from .pca import align_loading_signs, class_composition
 from .pca import complete_numeric as _complete_numeric
 
 
 def _component_names(n_components: int) -> list[str]:
+    """['PC 1', 'PC 2', ...]."""
     return [f"PC {number}" for number in range(1, n_components + 1)]
 
 
@@ -37,7 +52,12 @@ def _svd_tables(
     n_components: int | None,
     scale_rows: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Fit an SVD to a feature-by-sample matrix after the requested margin transform."""
+    """Fit an SVD to a feature-by-sample matrix after the requested margin transform.
+
+    Each feature (row) is centred across samples, and divided by its SD if
+    ``scale_rows``.  Left singular vectors = feature coordinates, right singular
+    vectors = sample coordinates; returns both plus the scree table.
+    """
     numeric = _complete_numeric(matrix)
     if len(numeric.columns) < 3:
         raise ValueError("At least three samples are required for two-component stability.")
@@ -69,6 +89,7 @@ def _svd_tables(
         index=numeric.columns,
         columns=components,
     )
+    # Same sign convention as the sample PCA; variance explained = squared singular values.
     feature_vectors, sample_vectors = _orient_svd(feature_vectors, sample_vectors)
     variance = singular_values[:n_components] ** 2
     variance /= np.square(singular_values).sum()
@@ -147,6 +168,8 @@ def assign_hierarchical_modules(
     if not np.allclose(np.diag(matrix), 1.0):
         raise ValueError("Correlation matrix diagonal must equal one.")
 
+    # Signed distance 1 - rho: positively correlated features are close, anti-correlated
+    # ones far apart (unsigned would put them together).  Average linkage, cut at distance_cut.
     distance = 1.0 - (matrix if signed else np.abs(matrix))
     np.fill_diagonal(distance, 0.0)
     distance = np.clip(distance, 0.0, 2.0)
@@ -155,6 +178,7 @@ def assign_hierarchical_modules(
 
     tree = linkage(squareform(distance, checks=False), method="average")
     raw_labels = fcluster(tree, t=distance_cut, criterion="distance")
+    # Rename clusters module_1, module_2, ... in a reproducible order.
     groups = pd.Series(raw_labels, index=correlation.index)
     ordering = sorted(
         groups.groupby(groups, sort=False).groups.items(),
@@ -179,6 +203,7 @@ def loading_stability_summary(
     if not np.isfinite(loadings).all():
         raise ValueError("Bootstrap loadings must be finite.")
 
+    # How often is each feature among the top 10 % |loading| of a component across bootstraps?
     absolute = np.abs(loadings)
     top_count = max(1, int(np.ceil(len(feature_index) * 0.10)))
     top_indices = np.argsort(-absolute, axis=1, kind="stable")[:, :top_count, :]
@@ -187,6 +212,7 @@ def loading_stability_summary(
         for resample in range(loadings.shape[0]):
             top_mask[resample, top_indices[resample, :, component], component] = True
 
+    # Per feature and component: centre, spread and 95 % interval of the bootstrap loadings.
     rows: list[dict[str, object]] = []
     for component_number, component in enumerate(component_names):
         for feature_number, feature in enumerate(feature_index):
@@ -239,7 +265,11 @@ def split_half_loading_stability(
     random_state: int,
     n_components: int = 2,
 ) -> pd.DataFrame:
-    """Compare feature-margin loadings from one deterministic sample split."""
+    """Compare feature-margin loadings from one deterministic sample split.
+
+    Fit the feature SVD on two random halves of the samples and correlate the
+    loadings: a component is interpretable only if both halves agree (r >= 0.5).
+    """
     numeric = _complete_numeric(values)
     if len(numeric.columns) < 6:
         raise ValueError("At least six samples are required for split-half stability.")
@@ -343,28 +373,8 @@ def loading_annotation_composition(
     annotation_name: str = "Annotation",
     n_largest: int = 6,
 ) -> pd.DataFrame:
-    """Report squared-loading shares by a feature annotation."""
-    if n_largest < 1:
-        raise ValueError("n_largest must be positive.")
-    labels = annotations.reindex(loadings.index).fillna("Unannotated").astype(str)
-    panel_share = labels.value_counts(normalize=True)
-    rows: list[dict[str, object]] = []
-    for component in loadings:
-        shares = loadings[component].pow(2).groupby(labels, observed=True).sum()
-        shares = shares / shares.sum()
-        largest = shares.nlargest(n_largest, keep="all").index
-        kept = shares.loc[largest].copy()
-        if len(largest) < len(shares):
-            kept.loc["Other"] = shares.drop(largest).sum()
-        for annotation, share in kept.items():
-            rows.append({
-                "Component": component,
-                annotation_name: annotation,
-                "squared_loading_share": share,
-                "panel_feature_share": panel_share.get(annotation, np.nan),
-                "enrichment_vs_panel": share / panel_share[annotation] if annotation in panel_share else np.nan,
-            })
-    return pd.DataFrame(rows)
+    """Report squared-loading shares by a feature annotation (see :func:`.pca.class_composition`)."""
+    return class_composition(loadings, annotations, n_largest=n_largest, annotation_name=annotation_name)
 
 
 def module_annotation_composition(
@@ -394,7 +404,6 @@ def module_annotation_composition(
     return pd.DataFrame(rows)
 
 
-
 def permuted_null_module_sizes(
     values: pd.DataFrame,
     *,
@@ -411,6 +420,9 @@ def permuted_null_module_sizes(
     generator = np.random.default_rng(random_state)
     array = numeric.to_numpy(dtype=float)
     rows: list[dict[str, object]] = []
+    # Shuffle each feature's values across samples independently: this destroys all
+    # correlation between features but keeps every feature's distribution.  Modules
+    # found in such data show how large modules get by chance.
     for permutation in range(1, n_permutations + 1):
         permuted = np.empty_like(array)
         for feature_number in range(array.shape[0]):

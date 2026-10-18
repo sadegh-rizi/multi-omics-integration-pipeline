@@ -88,6 +88,19 @@ Not ported: the noisyR window-sensitivity grid and noisyR-vs-manual plots
   the one-component case.
 * The integration enrichment hard-coded the size of the protein background. The
   background is now the set of proteins in the integration block.
+* The null of the within-region cross-omics predictability benchmark shuffled
+  the target omics separately for the training and the test rows of each fold,
+  so one sample could appear on both sides of a fold. It now shuffles once per
+  null replicate and then applies the folds (`stages/integration.run_benchmark`).
+* The ASCA+ summary figure labelled its score panels "effect + residual"; they
+  show the effect scores only, and are now labelled that way.
+* A few stale or duplicated pieces were removed: a second hand-written
+  Benjamini-Hochberg in `stats/permanova.py` (now `bh_adjust`), a copy of the
+  model formula in `stats/diagnostics.py`, a duplicated class-composition
+  function in `multivariate/feature_modules.py`, two identical calibration
+  sweeps in `outliers/calibration.py` (now one `_calibrate_sweep`), a
+  hard-coded "four multi-pup cages" caveat, and an out-of-date note about
+  unresolved litter identity in `stats/power.py`.
 
 ## Things deliberately kept as they were
 

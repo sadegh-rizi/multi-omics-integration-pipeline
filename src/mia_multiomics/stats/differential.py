@@ -13,6 +13,11 @@ import statsmodels.formula.api as smf
 from .common import bh_adjust
 
 FdrDenominator = Literal["fitted", "all_features"]
+
+# The planned model, fitted per feature within one region.  Control and male are
+# the reference levels, so the three coefficients below read as
+#   MIA vs control (in males), female vs male (in controls), and the interaction
+#   (how much the MIA effect differs between females and males).
 _FORMULA = "value ~ C(BioGroup, Treatment(reference='Saline Control')) * C(Sex, Treatment(reference='Male'))"
 _EFFECTS = {
     "MIA vs Saline Control": "C(BioGroup, Treatment(reference='Saline Control'))[T.MIA]",
@@ -30,6 +35,7 @@ class DifferentialResults:
 
 
 def _validate_inputs(values: pd.DataFrame, metadata: pd.DataFrame, sample_column: str) -> None:
+    """Every sample column of ``values`` needs exactly one metadata row."""
     if sample_column not in metadata:
         raise KeyError(f"Metadata is missing {sample_column!r}.")
     if metadata[sample_column].duplicated().any():
@@ -70,6 +76,7 @@ def fit_regionwise_differential(
     if effect_scale not in {"normalized_log2", "pareto_scaled_log2"}:
         raise ValueError("effect_scale must be 'normalized_log2' or 'pareto_scaled_log2'.")
 
+    # Metadata in the same sample order as the value columns, with short column names for the formula.
     ordered_metadata = metadata.set_index(sample_column, drop=False).loc[values.columns].copy()
     ordered_metadata = ordered_metadata.rename(
         columns={region_column: "Region", group_column: "BioGroup", sex_column: "Sex"}
@@ -79,11 +86,14 @@ def fit_regionwise_differential(
     feature_qc: list[dict[str, object]] = []
     fitted_effects: list[dict[str, object]] = []
 
+    # One model per (region, feature).
     for region, region_metadata in ordered_metadata.groupby("Region", sort=False, observed=True):
         samples = region_metadata[sample_column].tolist()
         for feature, row in values.loc[:, samples].iterrows():
+            # Long table for this feature: one row per sample with group, sex and value.
             analysis = region_metadata.loc[:, [sample_column, "BioGroup", "Sex"]].copy()
             analysis["value"] = pd.to_numeric(row.reindex(samples), errors="coerce").to_numpy()
+            # How many non-missing values each group x sex cell has (missing values are never imputed).
             cell_counts = {
                 f"n_{group.replace(' ', '_').lower()}_{sex.lower()}": int(
                     analysis.loc[
@@ -102,12 +112,14 @@ def fit_regionwise_differential(
                 "n_missing_after_preprocessing": len(samples) - n_observed,
                 **cell_counts,
             }
+            # Too few values in any cell: the interaction model is not estimable, so skip and record why.
             if min(cell_counts.values()) < min_per_cell:
                 qc["fit_status"] = "excluded"
                 qc["exclusion_reason"] = f"fewer than {min_per_cell} usable observations in at least one BioGroup x Sex cell"
                 feature_qc.append(qc)
                 continue
 
+            # Ordinary least squares on the observed values only.
             model = smf.ols(_FORMULA, data=analysis.dropna(subset=["value"])).fit()
             qc["fit_status"] = "fitted"
             qc["exclusion_reason"] = ""
@@ -138,6 +150,9 @@ def fit_regionwise_differential(
             raise ValueError("Annotation index must uniquely identify features.")
         effects = effects.join(annotations, on="Feature", how="left")
 
+    # Benjamini-Hochberg FDR, separately for every region x effect family.  With
+    # 'all_features' the denominator is the whole panel (features that could not
+    # be fitted count as tests that were not significant), which is conservative.
     effects["p_value_fdr"] = np.nan
     effects["fdr_denominator"] = np.nan
     for _, index in effects.groupby(["Region", "Effect"], sort=False, observed=True).groups.items():
@@ -171,6 +186,8 @@ def fit_pooled_mixed_sensitivity(
     design = metadata.set_index(sample_column, drop=False).loc[values.columns].copy().rename(
         columns={mouse_column: "Mouse", region_column: "Region", group_column: "BioGroup", sex_column: "Sex"}
     )
+    # All three regions in one model: group x region and group x sex fixed effects,
+    # and a random intercept per mouse because each mouse contributes three samples.
     group, sex = "C(BioGroup, Treatment('Saline Control'))", "C(Sex, Treatment('Male'))"
     formula = f"value ~ {group} * C(Region) + {group} * {sex}"
     rows: list[dict[str, object]] = []
@@ -192,6 +209,7 @@ def fit_pooled_mixed_sensitivity(
             rows.append({"Feature": feature, "Term": "", "estimate_log2": np.nan, "standard_error": np.nan, "p_value": np.nan,
                          "n_usable": len(analysis), "fit_status": "failed", "failure_reason": failure})
             continue
+        # Keep convergence warnings with the result instead of printing them.
         warning_text = " | ".join(str(warning.message) for warning in caught_warnings)
         fit_status = "fitted" if model.converged else "not_converged"
         for term, estimate in model.params.items():

@@ -36,6 +36,7 @@ def exclude_nonpositive(intensity: pd.DataFrame) -> pd.DataFrame:
 
 
 def _check_blanks(intensity: pd.DataFrame, blanks: pd.DataFrame) -> pd.DataFrame:
+    """Blanks must match the samples' features, exist, and be non-negative; missing blank values count as 0."""
     if not intensity.index.equals(blanks.index):
         raise ValueError("Sample and blank tables must have the same features in the same order.")
     if blanks.shape[1] == 0:

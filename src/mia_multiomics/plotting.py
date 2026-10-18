@@ -110,9 +110,11 @@ def scores_plot(scores: pd.DataFrame, metadata: pd.DataFrame, color_by: str, *, 
     meta = metadata.set_index("Sample").loc[scores.index]
     fig, ax = plt.subplots(figsize=(6.5, 5.4))
     values = meta[color_by]
+    # Continuous variable (e.g. tissue mass): one colour scale.
     if pd.api.types.is_numeric_dtype(values) and values.nunique() > 8:
         points = ax.scatter(scores[x], scores[y], c=values, cmap="viridis", edgecolor="black", linewidth=0.3)
         fig.colorbar(points, ax=ax, label=color_by)
+    # Categorical variable: one colour per category, marker = sex, optional 95 % ellipse per category.
     else:
         values = values.astype(str)
         colors = palette_for(values, color_by)
@@ -131,6 +133,7 @@ def scores_plot(scores: pd.DataFrame, metadata: pd.DataFrame, color_by: str, *, 
         if markers is not None:
             handles += [plt.Line2D([], [], marker=m, linestyle="", color="#555555", label=s) for s, m in SEX_MARKERS.items()]
         ax.legend(handles=handles, title=color_by, fontsize=8, loc="best")
+    # Extra curves (e.g. Hotelling limits), point labels, axis titles with % variance.
     for curve in outline or []:
         ax.plot(curve[:, 0], curve[:, 1], color="#555555", linewidth=1.0)
     if label is not None:

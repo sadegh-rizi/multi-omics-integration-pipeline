@@ -43,6 +43,7 @@ def hit_counts(view: View) -> pd.DataFrame:
 
 
 def _volcano_panel(ax, block: pd.DataFrame, alpha: float, n_labels: int) -> None:
+    """Draw one volcano (effect vs -log10 p) into ``ax``; FDR hits in orange, smallest p labelled."""
     hit = block["p_value_fdr"].le(alpha)
     log_p = -np.log10(block["p_value"])
     ax.scatter(block["estimate_log2"], log_p, s=9, color="#999999", alpha=0.6)
@@ -114,6 +115,7 @@ def small_p_counts(view: View, thresholds: tuple[float, ...] = P_THRESHOLDS) -> 
 
 
 def _find_feature(view: View, feature) -> object:
+    """Accept a feature ID or a readable name (e.g. "Cer(d18:0_14:0)"); it must survive the filters."""
     if feature in view.values.index:
         return feature
     matches = view.labels.index[view.labels.eq(str(feature))]

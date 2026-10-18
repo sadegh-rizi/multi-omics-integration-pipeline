@@ -53,6 +53,7 @@ def run(settings: Settings, omics: str = "lipidomics") -> dict:
 
 # ---------------------------------------------------------------- pooled QC and blanks
 def _pooled_qc(data, out) -> dict:
+    """Signal-to-blank ratios, Tech-Mix CV and drift, and technical vs biological variance."""
     raw, blanks, techmix = data.values, data.blanks, data.techmix
 
     # Signal-to-blank ratio for every feature (the blank filter's evidence).
@@ -102,6 +103,7 @@ def _pooled_qc(data, out) -> dict:
 def _missingness(data, classes, out) -> None:
     """Where are values missing, and does missingness differ between groups?"""
     out = out / "missingness"
+    # Missingness is described on the raw delivered values (zeros counted as missing).
     raw = exclude_nonpositive(data.values)
     meta = data.metadata
     by_feature = qc.missingness_by_feature(raw, data.features)
@@ -114,6 +116,7 @@ def _missingness(data, classes, out) -> None:
         "pct_features_above_prevalence_limit": 100 * missing_fraction(data.values).gt(config.MAX_MISSING_FRACTION).mean(),
     }]), out / "missingness_summary.csv")
 
+    # Do MIA and control (or females and males) differ in how many values they miss?
     tests = []
     for column, first, second in ((config.GROUP_COL, config.MIA, config.CONTROL), (config.SEX_COL, "Female", "Male")):
         write_csv(qc.missingness_by_group(by_sample, column), out / f"missingness_by_{column.lower().replace(' ', '_')}.csv")
@@ -131,6 +134,7 @@ def _missingness(data, classes, out) -> None:
         [("raw", raw), ("prevalence", after_prevalence), ("blank_filter", after_blank),
          ("detection_limit", after_detection)], meta), out / "missingness_by_stage.csv")
 
+    # Heatmaps of the features with any missing value, samples sorted by group or by region.
     with_missing = by_feature.loc[by_feature["n_missing"].gt(0), "Feature"]
     if len(with_missing):
         order_features = classes.loc[with_missing].sort_values().index
@@ -157,6 +161,7 @@ def _pca_overview(values: pd.DataFrame, metadata: pd.DataFrame, features: pd.Dat
     scopes = [("pooled", metadata["Sample"].tolist())] + [(r.lower(), region_samples(metadata, r)) for r in config.REGIONS]
     attribution, concentration, composition, headline = [], [], [], {}
     for scope, samples in scopes:
+        # PCA of complete, autoscaled features: scree, scores, loadings and design attribution.
         matrix = for_multivariate(values.loc[:, samples])
         model, scores, loadings = pca.fit_pca(matrix)
         loadings = pca.align_loading_signs(loadings)
@@ -169,6 +174,7 @@ def _pca_overview(values: pd.DataFrame, metadata: pd.DataFrame, features: pd.Dat
 
         plotting.save_figure(plotting.scree_plot(model.explained_variance_ratio_[:10], f"PCA scree: {scope}"),
                              out / "figures" / f"scree_{scope}")
+        # Score plots coloured by each design factor (all factors for the pooled PCA).
         for column in PCA_COLOR_BY if scope == "pooled" else (config.GROUP_COL, config.SEX_COL, config.CAGE_COL):
             fig = plotting.scores_plot(scores, metadata, column, variance=model.explained_variance_ratio_,
                                        title=f"{scope}: PCA scores by {column}",

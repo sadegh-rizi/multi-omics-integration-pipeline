@@ -53,17 +53,21 @@ def fit_mofa(blocks: dict[str, pd.DataFrame], metadata: pd.DataFrame, *, seed: i
 
 
 def _fit(entry_point, blocks, views, group_index, group_names, sample_names, seed, n_factors, iterations, ard_factors) -> MofaFit:
+    """The mofapy2 calls: data (views x groups), options, training, then read out Z, W and R²."""
     model = entry_point()
     model.set_data_matrix(
         [[blocks[v].iloc[index].to_numpy(dtype=float) for index in group_index] for v in views],
         views_names=views, groups_names=group_names, samples_names=sample_names,
         features_names=[[f"{v}::{f}" for f in blocks[v].columns.astype(str)] for v in views])
+    # scale_views: every omics gets equal total variance, so the largest panel does not dominate.
+    # center_groups: each group (region) is centred, so factors describe variation *within* groups.
     model.set_data_options(scale_views=True, center_groups=True)
     model.set_model_options(factors=n_factors, ard_factors=ard_factors)
     model.set_train_options(iter=iterations, startELBO=1, freqELBO=1, convergence_mode="fast", dropR2=0.02,
                             seed=seed, quiet=True, verbose=False)
     model.build()
     model.run()
+    # Posterior means: Z = sample factor scores, W = feature weights (one matrix per view).
     expectations = model.model.getExpectations()
     variance = np.asarray(model.model.calculate_variance_explained(), dtype=float)
     return MofaFit(factors=np.asarray(expectations["Z"]["E"], dtype=float),
@@ -103,6 +107,8 @@ def seed_stability(fits: list[MofaFit], *, by: str = "scores", threshold: float 
     Matches weaker than ``threshold`` do not count.  Also returns each fit's
     weights re-ordered and sign-flipped to the reference factors.
     """
+    # MOFA+ factors come out in arbitrary order and sign for every random seed, so each fit
+    # is matched to the first one (the reference) before counting how often a factor recurs.
     reference = fits[0]
     ref = reference.factors if by == "scores" else stacked_loadings(reference.weights)
     n = ref.shape[1]
@@ -114,8 +120,10 @@ def seed_stability(fits: list[MofaFit], *, by: str = "scores", threshold: float 
         else:
             candidate = stacked_loadings(fit.weights)
         pairing, strength = match_factors(ref, candidate)
+        # A weak match counts as "not recovered" in this seed.
         strength = np.where(strength >= threshold, strength, np.nan)
         strengths.append(strength)
+        # Re-order and sign-flip this fit's weights to line up with the reference factors.
         aligned = []
         for w in fit.weights:
             out = np.full((w.shape[0], n), np.nan)
@@ -124,6 +132,7 @@ def seed_stability(fits: list[MofaFit], *, by: str = "scores", threshold: float 
                     out[:, r] = sign * w[:, int(c)]
             aligned.append(out)
         aligned_weights.append(aligned)
+    # seeds x factors matrix of match strengths; NaN = not recovered in that seed.
     matrix = np.vstack(strengths)
     recovered = np.isfinite(matrix).sum(axis=0)
     table = pd.DataFrame({

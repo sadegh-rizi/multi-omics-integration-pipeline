@@ -44,23 +44,30 @@ def run(settings: Settings, omics: str = "lipidomics", population: str = config.
     out = settings.out(omics, "05_region_persistence", population)
     prepared = prepare(settings, omics, population)
     values, meta = prepared.values, prepared.metadata
+    # Within-mouse differences for the three region pairs (mouse x feature matrices).
     contrasts = build_region_contrasts(values, meta)
 
     within, interactions, iccs, concordance, reliability, disattenuation = [], [], [], [], [], []
     for number, (name, _, _) in enumerate(REGION_CONTRASTS):
         contrast = contrasts[name]
         seed = settings.seed + number
+        # Per feature: is the region difference non-zero in each group?
         within.append(one_sample_region_tests(contrast))
+        # Per feature: does the region difference differ between MIA and control (Welch, with
+        # the variance inflated by the litter ICC as a sensitivity)?
         icc = intraclass_correlation(contrast.values, contrast.metadata[["Sample", config.CAGE_COL, config.GROUP_COL]],
                                      n_bootstraps=settings.n_bootstraps, random_state=seed)
         iccs.append(icc.assign(Contrast=name))
         interactions.append(interaction_tests(contrast, icc))
+        # Whole profile: correlation of the control and MIA difference profiles, corrected for
+        # the noise in each profile (split-half reliability) -> disattenuated concordance.
         concordance.append(concordance_summary(contrast))
         summary, draws = estimate_split_half_reliability(contrast, n_splits=settings.n_split_halves, random_state=seed)
         reliability.append(summary)
         disattenuation.append(disattenuated_concordance(contrast, summary, draws, n_bootstraps=settings.n_bootstraps,
                                                         random_state=seed))
 
+    # One FDR family for the interaction tests of all three contrasts together.
     interactions = apply_interaction_fdr(pd.concat(interactions, ignore_index=True), n_features=len(values),
                                          n_contrasts=len(REGION_CONTRASTS))
     disattenuation = pd.concat(disattenuation, ignore_index=True).assign(population=population, omics=omics)

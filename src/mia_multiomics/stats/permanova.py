@@ -1,4 +1,11 @@
-"""Sequential PERMANOVA utilities for the LPJ lipidomics analysis."""
+"""Sequential PERMANOVA per region: is there *any* multivariate group or sex difference?
+
+PERMANOVA partitions the Euclidean distances between samples (here on
+autoscaled features) like an ANOVA: how much of the total spread is explained
+by group, then sex, then their interaction (sequential, "type I" sums of
+squares).  P-values come from Freedman-Lane permutations, which permute the
+residuals of the reduced model so that earlier terms are held fixed.
+"""
 
 from __future__ import annotations
 
@@ -7,12 +14,16 @@ import pandas as pd
 from patsy import dmatrix
 from scipy.spatial.distance import pdist, squareform
 
+from .common import bh_adjust
+
 
 def _projection(design: np.ndarray) -> np.ndarray:
+    """Hat matrix H = X (X'X)^+ X' of a design matrix."""
     return design @ np.linalg.pinv(design.T @ design) @ design.T
 
 
 def _gower_matrix(values: np.ndarray) -> np.ndarray:
+    """Gower-centred matrix G = -1/2 C D^2 C (samples x samples); trace(G) = total sum of squares."""
     distances = squareform(pdist(values, metric="euclidean"))
     n_samples = len(values)
     centering = np.eye(n_samples) - np.ones((n_samples, n_samples)) / n_samples
@@ -20,6 +31,7 @@ def _gower_matrix(values: np.ndarray) -> np.ndarray:
 
 
 def _sequential_statistics(gower: np.ndarray, designs: list[np.ndarray]) -> list[dict[str, float]]:
+    """Sum of squares, R² and pseudo-F of each term added in turn (``designs`` are nested)."""
     total_ss = float(np.trace(gower))
     fitted_ss = 0.0
     rows: list[dict[str, float]] = []
@@ -76,6 +88,7 @@ def permanova_by_region(
         diagnostics.append({"Region": region, "n_samples": len(samples), "n_features_input": len(values), "n_features_used": len(complete), "n_features_excluded_missing": len(values) - len(complete)})
         if complete.shape[0] < 2:
             raise ValueError(f"{region}: fewer than two complete features remain for PERMANOVA.")
+        # Three nested designs: group; group + sex; group + sex + interaction.
         design_frame = region_metadata.loc[:, ["BioGroup", "Sex"]].copy()
         group_formula = "1 + C(BioGroup, Treatment(reference='Saline Control'))"
         group_sex_formula = group_formula + " + C(Sex, Treatment(reference='Male'))"
@@ -87,6 +100,8 @@ def permanova_by_region(
         gower = _gower_matrix(complete.T.to_numpy(dtype=float))
         observed = _sequential_statistics(gower, designs)
         for term_index, term in enumerate(terms):
+            # Freedman-Lane: split G into the part fitted by the earlier terms and the
+            # residual part, permute only the residual part, and recompute the term's F.
             reduced = np.ones((len(samples), 1)) if term_index == 0 else designs[term_index - 1]
             reduced_projection = _projection(reduced)
             residualizer = np.eye(len(samples)) - reduced_projection
@@ -106,8 +121,5 @@ def permanova_by_region(
                 "permutation_method": "Freedman-Lane",
             })
     results = pd.DataFrame(result_rows)
-    results["p_value_fdr"] = np.nan
-    order = results["p_value"].sort_values().index
-    adjusted = np.minimum.accumulate((results.loc[order, "p_value"].to_numpy() * len(results) / np.arange(1, len(results) + 1))[::-1])[::-1].clip(0, 1)
-    results.loc[order, "p_value_fdr"] = adjusted
+    results["p_value_fdr"] = bh_adjust(results["p_value"])     # BH over all regions x terms
     return results, pd.DataFrame(diagnostics)

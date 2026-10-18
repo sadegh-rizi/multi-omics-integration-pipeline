@@ -1,4 +1,16 @@
-"""Multivariate sample-outlier diagnostics for PCA score spaces."""
+"""Multivariate sample-outlier diagnostics for PCA score spaces.
+
+The classical regional screen (``stages/outliers.py: run_screen``):
+
+* **Hotelling T²** - distance of a sample from the centre *within* the first k
+  PCs, scaled by their variances; the 95 % / 99 % limits use the exact Beta
+  distribution for in-sample observations.  Samples above these limits define
+  the ``t2_95`` / ``t2_99`` analysis populations.
+* **robust Mahalanobis** - the same idea with a minimum-covariance-determinant
+  (MCD) estimate, so that an outlier cannot inflate the covariance it is judged by.
+* **DModX** - distance of a sample *to* the PCA plane (its reconstruction error):
+  large when the sample has a pattern the main components do not describe.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +22,7 @@ from sklearn.decomposition import PCA
 
 
 def _numeric_scores(scores: pd.DataFrame) -> pd.DataFrame:
+    """Complete PCA scores with more samples than components (needed for an invertible covariance)."""
     numeric = scores.apply(pd.to_numeric, errors="coerce")
     if numeric.empty or numeric.isna().to_numpy().any():
         raise ValueError("Outlier diagnostics require complete PCA scores.")
@@ -24,7 +37,9 @@ def hotelling_t2(scores: pd.DataFrame) -> pd.DataFrame:
     n_samples, n_components = numeric.shape
     centered = numeric.to_numpy(dtype=float) - numeric.to_numpy(dtype=float).mean(axis=0)
     covariance_inverse = np.linalg.pinv(np.cov(centered, rowvar=False))
+    # T² = x' S^-1 x for every (centred) sample x, S = covariance of the scores.
     statistic = np.einsum("ij,jk,ik->i", centered, covariance_inverse, centered)
+    # In-sample limit: (n-1)²/n x Beta(p/2, (n-p-1)/2) quantile.
     factor = (n_samples - 1) ** 2 / n_samples
     return pd.DataFrame({
         "hotelling_t2": statistic,

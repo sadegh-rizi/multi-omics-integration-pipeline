@@ -57,6 +57,7 @@ class Options:
     seed: int = 2026
 
     def __post_init__(self) -> None:
+        """Store ``exclude`` as a tuple (hashable) and reject impossible settings early."""
         object.__setattr__(self, "exclude", tuple(self.exclude or ()))
         if self.omics not in config.VIEWS:
             raise ValueError(f"omics must be one of {config.VIEWS}.")

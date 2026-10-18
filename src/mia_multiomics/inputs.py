@@ -173,14 +173,22 @@ def load_metadata(settings: Settings) -> pd.DataFrame:
 # ---------------------------------------------------------------- the three omics
 def _vendor_omics(settings: Settings, name: str, sheet: str, marker: str,
                   annotation_columns: list[str], suffix_column: str) -> OmicsData:
+    """Read one omics sheet of the facility's Excel report (lipidomics and metabolomics share the layout).
+
+    ``marker`` is the header of the feature-name column; it locates the table
+    below the label rows.  ``suffix_column`` disambiguates repeated names
+    (e.g. a lipid measured in both ion modes).
+    """
     table = read_table_after_header(settings.data_dir / config.REPORT_WORKBOOK, sheet, marker)
     # The lipidomics sheet repeats its header block before the negative-mode
     # lipids; drop those embedded label/header rows.
     table = table.loc[table[marker].notna() & table[marker].ne(marker)].reset_index(drop=True)
+    # Split the measurement columns into biological samples, blanks and Tech-Mix injections.
     samples, blanks, techmix = measurement_columns(table)
     index = _unique_names(table[marker], table[suffix_column])
     metadata = load_metadata(settings)
     values = _numeric(table, samples, index)
+    # Rename sample columns to the shared "<prefix>-NN" IDs so all omics join on the same names.
     values.columns = [sample_id(sample_number(c)) for c in values.columns]
     features = table.loc[:, annotation_columns].set_axis(index)
     return OmicsData(
